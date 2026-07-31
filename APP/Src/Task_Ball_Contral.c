@@ -12,8 +12,10 @@ static BallContral_t BallContral;
 
 static PID_Confg_t PID_Ball_Confg = {
     .Kp = 0.9,
-    .Ki = 0,
-    .Kd = 0.18,
+    .Ki = 0.6,
+    .Kd = 0.22,
+    .IntMax = 40,
+    .IntMin = -40,
     .OutMax = 220
 };
 
@@ -25,7 +27,7 @@ void Task_Ball_Contral_Init(void){
     BallContral_Init(&BallContral, &Serial_K230, &Serial_Emm_Ball, &PID_Ball_Confg);
     K230_Init(&Serial_K230, 0, 0);
 
-    SoftTimer_Init(&SoftTimer_K230, SOFTTIMER_MODE_PERIODIC, 80);
+    SoftTimer_Init(&SoftTimer_K230, SOFTTIMER_MODE_PERIODIC, 50);
 
     SoftTimer_Start(&SoftTimer_K230);
 

@@ -1,9 +1,11 @@
 #include "Ball_Contral.h"
 #include "main.h"
 
-#define BALL_VELOCITY_FILTER_TAU_MS 25.0f
+#define BALL_VELOCITY_FILTER_TAU_MS 18.0f
 #define BALL_FRAME_DT_MIN_MS 2U
 #define BALL_FRAME_DT_MAX_MS 200U
+#define BALL_INTEGRAL_ERROR_LIMIT 28.0f
+#define BALL_INTEGRAL_SPEED_LIMIT 120.0f
 
 static PID_val BallContral_Calculate(BallContral_t *BallContral, PID_val Actual)
 {
@@ -36,11 +38,13 @@ static PID_val BallContral_Calculate(BallContral_t *BallContral, PID_val Actual)
     PID->Cur_Error = PID->Target - PID->Actual;
     PID->Error_Rate_Filter = -BallContral->Ball_Velocity;
 
-    if(Dt_s > 0.0f){
+    if(Dt_s > 0.0f
+       && ((PID->Cur_Error >= 0.0f ? PID->Cur_Error : -PID->Cur_Error) <= BALL_INTEGRAL_ERROR_LIMIT)
+       && ((BallContral->Ball_Velocity >= 0.0f ? BallContral->Ball_Velocity : -BallContral->Ball_Velocity) <= BALL_INTEGRAL_SPEED_LIMIT)){
         PID->ErrorInt += PID->Cur_Error * Dt_s;
-        if(PID->ErrorInt > PID->IntMax) PID->ErrorInt = PID->IntMax;
-        else if(PID->ErrorInt < PID->IntMin) PID->ErrorInt = PID->IntMin;
     }
+    if(PID->ErrorInt > PID->IntMax) PID->ErrorInt = PID->IntMax;
+    else if(PID->ErrorInt < PID->IntMin) PID->ErrorInt = PID->IntMin;
 
     PID->Output = PID->Kp * PID->Cur_Error
                 + PID->Ki * PID->ErrorInt
