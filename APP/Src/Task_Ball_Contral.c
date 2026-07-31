@@ -6,6 +6,19 @@
 
 #define BALL_5CM_OFFSET                 138.0f
 #define BALL_TARGET_TOLERANCE           4.0f
+#define BALL_MINUS_SETTLE_TOLERANCE     3.0f
+#define BALL_MINUS_SETTLE_DELTA         3.0f
+#define BALL_MINUS_SETTLE_SPEED         25.0f
+#define BALL_MINUS_SETTLE_MS            650U
+#define BALL_MINUS_SETTLE_FRAMES        8U
+#define BALL_MINUS_RELEASE_TOLERANCE    6.0f
+#define BALL_MINUS_RELEASE_SPEED        50.0f
+#define BALL_MINUS_RELEASE_FRAMES       3U
+#define BALL_MINUS_TRIM_WINDOW          24.0f
+#define BALL_MINUS_TRIM_SETTLE_MS       250U
+#define BALL_MINUS_TRIM_GAIN            0.6f
+#define BALL_MINUS_TRIM_STEP_MAX        6.0f
+#define BALL_MINUS_TRIM_LIMIT           28.0f
 #define BALL_ENDPOINT_MIN_PROGRESS      100.0f
 #define BALL_ENDPOINT_STABLE_BAND       3.0f
 #define BALL_ENDPOINT_STABLE_MS         200U
@@ -41,6 +54,22 @@ static uint32_t Task_Ball_Last_Vision_Frame_Tick = 0;
 static PID_val Task_Ball_Endpoint_Anchor_x = 0.0f;
 static uint32_t Task_Ball_Endpoint_Stable_Tick = 0;
 static uint8_t Task_Ball_Endpoint_Tracking = 0;
+static uint32_t Task_Ball_Minus_Settle_Tick = 0;
+static uint8_t Task_Ball_Minus_Settle_Frames = 0;
+static uint8_t Task_Ball_Minus_Release_Frames = 0;
+static PID_val Task_Ball_Plus_Endpoint_x = 0.0f;
+static PID_val Task_Ball_Minus_Final_Target_x = 0.0f;
+static PID_val Task_Ball_Minus_Target_Trim = 0.0f;
+
+static PID_val Task_Ball_Abs(PID_val Value){
+    return (Value < 0.0f) ? -Value : Value;
+}
+
+static PID_val Task_Ball_Clamp(PID_val Value, PID_val Min, PID_val Max){
+    if(Value > Max) return Max;
+    if(Value < Min) return Min;
+    return Value;
+}
 
 static void Task_Ball_Endpoint_Tracking_Reset(void){
     Task_Ball_Endpoint_Anchor_x = 0.0f;
@@ -48,9 +77,113 @@ static void Task_Ball_Endpoint_Tracking_Reset(void){
     Task_Ball_Endpoint_Tracking = 0;
 }
 
+static void Task_Ball_Minus_Tracking_Reset(void){
+    Task_Ball_Minus_Settle_Tick = 0;
+    Task_Ball_Minus_Settle_Frames = 0;
+    Task_Ball_Minus_Release_Frames = 0;
+}
+
+static PID_val Task_Ball_Minus_Base_Target(void){
+    return Task_Ball_Origin_x - BALL_5CM_OFFSET;
+}
+
+static void Task_Ball_Minus_Final_Reset(void){
+    Task_Ball_Plus_Endpoint_x = 0.0f;
+    Task_Ball_Minus_Final_Target_x = 0.0f;
+    Task_Ball_Minus_Target_Trim = 0.0f;
+    Task_Ball_Minus_Tracking_Reset();
+}
+
+static void Task_Ball_Minus_Apply_Target(void){
+    BallContral_Set_Target(&BallContral,
+                           Task_Ball_Minus_Base_Target() + Task_Ball_Minus_Target_Trim);
+}
+
+static void Task_Ball_Minus_Begin_Return(PID_val Plus_Endpoint){
+    Task_Ball_Plus_Endpoint_x = Plus_Endpoint;
+    Task_Ball_Minus_Final_Target_x = (2.0f * Task_Ball_Origin_x) - Task_Ball_Plus_Endpoint_x;
+    Task_Ball_Minus_Target_Trim = 0.0f;
+    Task_Ball_Minus_Tracking_Reset();
+    Task_Ball_Minus_Apply_Target();
+}
+
+static void Task_Ball_Minus_Trim_Target(PID_val Position_Error){
+    PID_val Adjustment = Position_Error * BALL_MINUS_TRIM_GAIN;
+
+    Adjustment = Task_Ball_Clamp(Adjustment,
+                                 -BALL_MINUS_TRIM_STEP_MAX,
+                                  BALL_MINUS_TRIM_STEP_MAX);
+    Task_Ball_Minus_Target_Trim += Adjustment;
+    Task_Ball_Minus_Target_Trim = Task_Ball_Clamp(Task_Ball_Minus_Target_Trim,
+                                                  -BALL_MINUS_TRIM_LIMIT,
+                                                   BALL_MINUS_TRIM_LIMIT);
+    BallContral_Clear_Integral(&BallContral);
+    Task_Ball_Minus_Apply_Target();
+}
+
 static void Task_Ball_Trajectory_Cancel(void){
     Task_Ball_Trajectory_State = TASK_BALL_TRAJECTORY_IDLE;
     Task_Ball_Endpoint_Tracking_Reset();
+    Task_Ball_Minus_Final_Reset();
+}
+
+static uint8_t Task_Ball_Minus5cm_Is_Stable(PID_val Position){
+    PID_val Position_Error = Task_Ball_Minus_Final_Target_x - Position;
+    PID_val Error = Task_Ball_Abs(Position_Error);
+    PID_val Frame_Delta = Task_Ball_Abs(Position - BallContral.Ball_Position_Pre);
+    PID_val Speed = Task_Ball_Abs(BallContral.Ball_Velocity);
+    uint32_t Now = HAL_GetTick();
+    uint32_t Required_Settle_ms;
+
+    if(!BallContral.Has_Ball_History
+       || Error > BALL_MINUS_TRIM_WINDOW
+       || Frame_Delta > BALL_MINUS_SETTLE_DELTA
+       || Speed > BALL_MINUS_SETTLE_SPEED){
+        Task_Ball_Minus_Settle_Tick = 0;
+        Task_Ball_Minus_Settle_Frames = 0;
+        return 0;
+    }
+
+    if(Task_Ball_Minus_Settle_Frames == 0U){
+        Task_Ball_Minus_Settle_Tick = Now;
+    }
+    if(Task_Ball_Minus_Settle_Frames < 0xFFU){
+        Task_Ball_Minus_Settle_Frames++;
+    }
+
+    Required_Settle_ms = (Error <= BALL_MINUS_SETTLE_TOLERANCE) ?
+                         BALL_MINUS_SETTLE_MS :
+                         BALL_MINUS_TRIM_SETTLE_MS;
+    if(Task_Ball_Minus_Settle_Frames < BALL_MINUS_SETTLE_FRAMES
+       || (uint32_t)(Now - Task_Ball_Minus_Settle_Tick) < Required_Settle_ms){
+        return 0;
+    }
+
+    if(Error <= BALL_MINUS_SETTLE_TOLERANCE){
+        return 1;
+    }
+
+    Task_Ball_Minus_Trim_Target(Position_Error);
+    Task_Ball_Minus_Tracking_Reset();
+    return 0;
+}
+
+static uint8_t Task_Ball_Minus5cm_Hold_Is_Lost(PID_val Position){
+    PID_val Target = Task_Ball_Minus_Final_Target_x;
+    PID_val Error = Task_Ball_Abs(Position - Target);
+    PID_val Speed = Task_Ball_Abs(BallContral.Ball_Velocity);
+
+    if(Error > BALL_MINUS_RELEASE_TOLERANCE
+       || Speed > BALL_MINUS_RELEASE_SPEED){
+        if(Task_Ball_Minus_Release_Frames < 0xFFU){
+            Task_Ball_Minus_Release_Frames++;
+        }
+    }
+    else{
+        Task_Ball_Minus_Release_Frames = 0;
+    }
+
+    return Task_Ball_Minus_Release_Frames >= BALL_MINUS_RELEASE_FRAMES;
 }
 
 static uint8_t Task_Ball_Target_Is_Reached(PID_val Position, PID_val Target,
@@ -107,6 +240,7 @@ static void Task_Ball_Trajectory_Prepare(PID_val Position){
     /* Capture the origin only from a newly decoded vision frame. */
     Task_Ball_Origin_x = Position;
     Task_Ball_Endpoint_Tracking_Reset();
+    Task_Ball_Minus_Final_Reset();
     BallContral_Start(&BallContral);
     BallContral_Set_Target(&BallContral, Task_Ball_Origin_x + BALL_5CM_OFFSET);
     Task_Ball_Trajectory_State = TASK_BALL_TRAJECTORY_TO_PLUS_5CM;
@@ -120,22 +254,28 @@ static void Task_Ball_Trajectory_Update(PID_val Position){
                                            1)){
                 /* Keep velocity history for a smooth reversal, but discard old integral bias. */
                 BallContral_Clear_Integral(&BallContral);
-                BallContral_Set_Target(&BallContral, Task_Ball_Origin_x - BALL_5CM_OFFSET);
+                Task_Ball_Minus_Begin_Return(Position);
                 Task_Ball_Endpoint_Tracking_Reset();
                 Task_Ball_Trajectory_State = TASK_BALL_TRAJECTORY_TO_MINUS_5CM;
             }
             break;
         case TASK_BALL_TRAJECTORY_TO_MINUS_5CM:
-            if(Task_Ball_Target_Is_Reached(Position,
-                                           Task_Ball_Origin_x - BALL_5CM_OFFSET,
-                                           -1)){
-                Task_Ball_Endpoint_Tracking_Reset();
+            if(Task_Ball_Minus5cm_Is_Stable(Position)){
+                Task_Ball_Minus_Release_Frames = 0;
                 Task_Ball_Trajectory_State = TASK_BALL_TRAJECTORY_HOLD_MINUS_5CM;
+            }
+            break;
+        case TASK_BALL_TRAJECTORY_HOLD_MINUS_5CM:
+            /* Keep the learned integral bias; it is needed to remove final static error. */
+            if(Task_Ball_Minus5cm_Hold_Is_Lost(Position)){
+                Task_Ball_Minus_Tracking_Reset();
+                BallContral_Clear_Integral(&BallContral);
+                Task_Ball_Minus_Apply_Target();
+                Task_Ball_Trajectory_State = TASK_BALL_TRAJECTORY_TO_MINUS_5CM;
             }
             break;
         case TASK_BALL_TRAJECTORY_IDLE:
         case TASK_BALL_TRAJECTORY_WAIT_ORIGIN:
-        case TASK_BALL_TRAJECTORY_HOLD_MINUS_5CM:
         default:
             break;
     }
@@ -194,6 +334,10 @@ void Task_Ball_Contral_Loop(void){
             }
             if(SoftTimer_Trigger(&SoftTimer_K230)){
                 Task_Ball_Endpoint_Tracking_Reset();
+                Task_Ball_Minus_Tracking_Reset();
+                if(Task_Ball_Trajectory_State == TASK_BALL_TRAJECTORY_HOLD_MINUS_5CM){
+                    Task_Ball_Trajectory_State = TASK_BALL_TRAJECTORY_TO_MINUS_5CM;
+                }
                 BallContral_Stop(&BallContral);
                 Task_Ball_Contral_State = TASK_BALL_CONTRAL_LOST;
             }
@@ -246,6 +390,7 @@ void Task_Ball_Start_5cm_Sequence(void){
     SoftTimer_Reset(&SoftTimer_K230);
     Task_Ball_Trajectory_State = TASK_BALL_TRAJECTORY_WAIT_ORIGIN;
     Task_Ball_Endpoint_Tracking_Reset();
+    Task_Ball_Minus_Final_Reset();
 
     if(Task_Ball_Contral_State == TASK_BALL_CONTRAL_IDLE){
         BallContral_Start(&BallContral);
