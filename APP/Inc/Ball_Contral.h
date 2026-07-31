@@ -23,6 +23,7 @@ typedef struct BallContral_Struct{
 
 void BallContral_Init(BallContral_t *BallContral, Serial_t *Serial_K230, Serial_t *Serial_Emm, PID_Confg_t *PID_Confg);
 void BallContral_Set_Target(BallContral_t *BallContral, PID_val Target);
+void BallContral_Clear_Integral(BallContral_t *BallContral);
 void BallContral_Run(BallContral_t *BallContral, PID_val Target);
 uint8_t BallContral_Get_is_Enable(BallContral_t *BallContral);
 void BallContral_Start(BallContral_t *BallContral);

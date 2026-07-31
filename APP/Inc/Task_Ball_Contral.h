@@ -16,6 +16,7 @@ void Task_Ball_Contral_Pop_Ready(void);
 void Task_Ball_Contral_Pop_Restore(void);
 void Task_Ball_Goto5cm(void);
 void Task_Ball_GotoMinus5cm(void);
+void Task_Ball_Start_5cm_Sequence(void);
 
 
 #endif

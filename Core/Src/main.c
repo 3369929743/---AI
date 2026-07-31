@@ -18,7 +18,6 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "stm32f4xx_hal.h"
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
@@ -27,7 +26,7 @@
 /* USER CODE BEGIN Includes */
 #include "PID.h"
 #include "Timer.h"
-#include "Key.h"
+#include "Key_manage.h"
 #include "OLED.h"
 #include "Task_Cloud.h"
 #include "K230.h"
@@ -53,7 +52,6 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-Key_t Key_User;
 Timer_t Timer_Tick;
 uint8_t i = 0;
 uint8_t j = 0;
@@ -73,31 +71,11 @@ void SystemClock_Config(void);
 void Timer_Tick_Callback(Timer_t *timer){
   if(timer == &Timer_Tick){
     j++;
-    Key_Tick(&Key_User, HAL_GPIO_ReadPin(User_Key_GPIO_Port, User_Key_Pin));
+    Key_Global_Tick();
     Task_Ball_Contral_Tick();
   }
 }
 
-void Key_Global_Callback(Key_t *Key, Key_Event_e Event){
-  if(Key == &Key_User){
-    switch(Event){
-      case KEY_EVENT_ONCE_PRESS:
-        i++;
-        Task_Ball_Contral_Toggle();
-        break;
-      case KEY_EVENT_DOUBLE_PRESS:
-        Task_Ball_Contral_Pop_Restore();
-        break;
-      case KEY_EVENT_LONG_PRESS:
-        Task_Ball_Goto5cm();
-        break;
-      case KEY_EVENT_LONG_PRESS_REPEAT:
-        break;
-      default:
-        break;
-    }
-  }
-}
 /* USER CODE END 0 */
 
 /**
@@ -134,10 +112,9 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+  Key_Glabal_Init();
   OLED_Init();
   OLED_ShowString(1, 1, "Hello World!");
-  Key_Init(&Key_User, KEY_LEVEL_HIGH);
-  Key_SetEventCallback(&Key_User, Key_Global_Callback);
   Task_Ball_Contral_Init();
   Task_Ball_Contral_Pop_Init();
   Timer_Init(&Timer_Tick, Timer_14);
@@ -151,8 +128,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    Key_Global_Trigger_Event();
     Task_Ball_Contral_Loop();
-    Key_Trigger_Event(&Key_User);
 
     if((uint32_t)(HAL_GetTick() - OLED_Last_Update) >= 50U){
       OLED_Last_Update = HAL_GetTick();

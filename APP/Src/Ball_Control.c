@@ -6,6 +6,7 @@
 #define BALL_FRAME_DT_MAX_MS 200U
 #define BALL_INTEGRAL_ERROR_LIMIT 28.0f
 #define BALL_INTEGRAL_SPEED_LIMIT 120.0f
+#define BALL_PID_OUTPUT_POLARITY (-1.0f)
 
 static PID_val BallContral_Calculate(BallContral_t *BallContral, PID_val Actual)
 {
@@ -46,9 +47,10 @@ static PID_val BallContral_Calculate(BallContral_t *BallContral, PID_val Actual)
     if(PID->ErrorInt > PID->IntMax) PID->ErrorInt = PID->IntMax;
     else if(PID->ErrorInt < PID->IntMin) PID->ErrorInt = PID->IntMin;
 
-    PID->Output = PID->Kp * PID->Cur_Error
-                + PID->Ki * PID->ErrorInt
-                - PID->Kd * BallContral->Ball_Velocity;
+    PID->Output = BALL_PID_OUTPUT_POLARITY
+                * (PID->Kp * PID->Cur_Error
+                 + PID->Ki * PID->ErrorInt
+                 - PID->Kd * BallContral->Ball_Velocity);
 
     if(PID->Output > PID->OutMax) PID->Output = PID->OutMax;
     else if(PID->Output < PID->OutMin) PID->Output = PID->OutMin;
@@ -97,6 +99,11 @@ void Ball_Contral_Pop_Run(BallContral_t *BallContral, int32_t Pulse){
 void BallContral_Set_Target(BallContral_t *BallContral, PID_val Target)
 {
     PID_Set_Target(&BallContral->PID_StepMotor, Target);
+}
+
+void BallContral_Clear_Integral(BallContral_t *BallContral)
+{
+    BallContral->PID_StepMotor.ErrorInt = 0.0f;
 }
 
 void BallContral_Run(BallContral_t *BallContral, PID_val Target){

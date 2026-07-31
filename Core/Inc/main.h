@@ -71,6 +71,14 @@ void Error_Handler(void);
 #define K230_TX_GPIO_Port GPIOD
 #define K230_RX_Pin GPIO_PIN_9
 #define K230_RX_GPIO_Port GPIOD
+#define Key2_Pin GPIO_PIN_6
+#define Key2_GPIO_Port GPIOC
+#define Key1_Pin GPIO_PIN_7
+#define Key1_GPIO_Port GPIOC
+#define Key3_Pin GPIO_PIN_15
+#define Key3_GPIO_Port GPIOA
+#define Key4_Pin GPIO_PIN_1
+#define Key4_GPIO_Port GPIOD
 
 /* USER CODE BEGIN Private defines */
 
