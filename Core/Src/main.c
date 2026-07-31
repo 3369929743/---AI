@@ -132,9 +132,20 @@ int main(void)
     Task_Ball_Contral_Loop();
 
     if((uint32_t)(HAL_GetTick() - OLED_Last_Update) >= 50U){
+      uint32_t Vision_Frame_Age;
+
       OLED_Last_Update = HAL_GetTick();
-      OLED_ShowNum(2, 1, i, 4);
-      OLED_ShowNum(2, 5, j, 4);
+      Vision_Frame_Age = Task_Ball_Get_Vision_Frame_Age();
+      if(Vision_Frame_Age > 9999U) Vision_Frame_Age = 9999U;
+
+      OLED_ShowChar(1, 1, 'C');
+      OLED_ShowNum(1, 2, Task_Ball_Get_Control_State(), 1);
+      OLED_ShowChar(1, 4, 'T');
+      OLED_ShowNum(1, 5, Task_Ball_Get_Trajectory_State(), 1);
+      OLED_ShowChar(1, 7, 'A');
+      OLED_ShowNum(1, 8, Vision_Frame_Age, 4);
+      OLED_ShowChar(2, 1, 'G');
+      OLED_ShowSignedNum(2, 2, Task_Ball_Get_Target_x(), 4);
       OLED_ShowSignedNum(3, 1, K230_GetError_x(), 4);
       OLED_ShowSignedNum(4, 1, K230_GetError_y(), 4);
     }

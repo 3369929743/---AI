@@ -1,12 +1,13 @@
 #include "Ball_Contral.h"
 #include "main.h"
 
-#define BALL_VELOCITY_FILTER_TAU_MS 18.0f
+#define BALL_VELOCITY_FILTER_TAU_MS 60.0f
 #define BALL_FRAME_DT_MIN_MS 2U
 #define BALL_FRAME_DT_MAX_MS 200U
 #define BALL_INTEGRAL_ERROR_LIMIT 28.0f
 #define BALL_INTEGRAL_SPEED_LIMIT 120.0f
 #define BALL_PID_OUTPUT_POLARITY (-1.0f)
+#define BALL_MOTOR_COMMAND_DEADBAND_PULSE 3
 
 static PID_val BallContral_Calculate(BallContral_t *BallContral, PID_val Actual)
 {
@@ -124,7 +125,8 @@ void BallContral_Run(BallContral_t *BallContral, PID_val Target){
     }
 
     Delta_Pulse = New_Target_Pulse - BallContral->Pipe_Target_Pulse;
-    if(Delta_Pulse != 0){
+    if(Delta_Pulse >= BALL_MOTOR_COMMAND_DEADBAND_PULSE ||
+       Delta_Pulse <= -BALL_MOTOR_COMMAND_DEADBAND_PULSE){
         Emm_Pos_Run_Quick(&BallContral->Emm_StepMotor, Delta_Pulse);
         BallContral->Pipe_Target_Pulse = New_Target_Pulse;
     }
