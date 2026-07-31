@@ -295,6 +295,7 @@ void Task_Ball_Contral_Init(void){
     Serial_Init(&Serial_Emm_Ball, Serial_1);
     BallContral_Init(&BallContral, &Serial_K230, &Serial_Emm_Ball, &PID_Ball_Confg);
     K230_Init(&Serial_K230, 0, 0);
+    K230_ResetZero();
 
     SoftTimer_Init(&SoftTimer_K230, SOFTTIMER_MODE_PERIODIC, K230_FRAME_TIMEOUT_MS);
 
@@ -325,6 +326,10 @@ void Task_Ball_Contral_Loop(void){
 
     switch(Task_Ball_Contral_State){
         case TASK_BALL_CONTRAL_IDLE:
+            if(K230_Error_Update()){
+                Task_Ball_Last_Vision_Frame_Tick = HAL_GetTick();
+                SoftTimer_Reset(&SoftTimer_K230);
+            }
             break;
         case TASK_BALL_CONTRAL_RUNNING:
             if(K230_Error_Update()){
@@ -396,6 +401,14 @@ void Task_Ball_Start_5cm_Sequence(void){
         BallContral_Start(&BallContral);
         Task_Ball_Contral_State = TASK_BALL_CONTRAL_RUNNING;
     }
+}
+
+void Task_Ball_Reset_Zero(void){
+    Task_Ball_Trajectory_Cancel();
+    K230_ResetZero();
+    SoftTimer_Reset(&SoftTimer_K230);
+    BallContral_Clear_Integral(&BallContral);
+    BallContral_Set_Target(&BallContral, 0);
 }
 
 uint8_t Task_Ball_Get_Control_State(void){

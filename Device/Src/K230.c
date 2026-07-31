@@ -3,6 +3,8 @@
 #include "Serial.h"
 
 #define K230_RX_BUFFER_SIZE 12
+#define K230_INT16_MAX_VALUE 32767
+#define K230_INT16_MIN_VALUE (-32768)
 
 typedef uint16_t K230_BUFFSIZE_t;
 
@@ -20,9 +22,20 @@ typedef struct {
     int16_t Offset_y;
     int16_t Error_x;
     int16_t Error_y;
+    int16_t Zero_x;
+    int16_t Zero_y;
+    uint8_t ZeroReady;
+    uint8_t ZeroCapturePending;
 } K230_BUFF_t;
 
 static K230_BUFF_t K230_Buffer ;
+
+static int16_t K230_ClampInt16(int32_t Value)
+{
+    if(Value > K230_INT16_MAX_VALUE) return K230_INT16_MAX_VALUE;
+    if(Value < K230_INT16_MIN_VALUE) return K230_INT16_MIN_VALUE;
+    return (int16_t)Value;
+}
 
 /**
  * @brief  初始化K230串口接收缓冲区及误差偏移量
@@ -37,6 +50,12 @@ void K230_Init(Serial_t *Serial, int16_t Offset_x, int16_t Offset_y)
     // 保存X轴和Y轴的误差偏移量，用于后续数据校准
     K230_Buffer.Offset_x = Offset_x;
     K230_Buffer.Offset_y = Offset_y;
+    K230_Buffer.Error_x = 0;
+    K230_Buffer.Error_y = 0;
+    K230_Buffer.Zero_x = 0;
+    K230_Buffer.Zero_y = 0;
+    K230_Buffer.ZeroReady = 1;
+    K230_Buffer.ZeroCapturePending = 0;
     // 保存串口对象指针
     K230_Buffer.Serial = Serial;
     // 初始化双缓冲区指针：Processptr指向BufferA（用于接收新数据），Readptr指向BufferB（用于读取处理）
@@ -83,10 +102,21 @@ uint8_t K230_Error_Update(void)
     /* Scan backwards so a 12-byte packet uses the newest complete frame. */
     for(Index = (int32_t)Size - 6; Index >= 0; Index--){
         if(Snapshot[Index] == 0xAA && Snapshot[Index + 1] == 0x55){
-            K230_Buffer.Error_x = (int16_t)((uint16_t)Snapshot[Index + 3] << 8 | Snapshot[Index + 2]);
-            K230_Buffer.Error_y = (int16_t)((uint16_t)Snapshot[Index + 5] << 8 | Snapshot[Index + 4]);
-            K230_Buffer.Error_x += K230_Buffer.Offset_x;
-            K230_Buffer.Error_y += K230_Buffer.Offset_y;
+            int32_t Position_x = (int16_t)((uint16_t)Snapshot[Index + 3] << 8 | Snapshot[Index + 2]);
+            int32_t Position_y = (int16_t)((uint16_t)Snapshot[Index + 5] << 8 | Snapshot[Index + 4]);
+
+            Position_x += K230_Buffer.Offset_x;
+            Position_y += K230_Buffer.Offset_y;
+
+            if(K230_Buffer.ZeroCapturePending){
+                K230_Buffer.Zero_x = K230_ClampInt16(Position_x);
+                K230_Buffer.Zero_y = K230_ClampInt16(Position_y);
+                K230_Buffer.ZeroReady = 1;
+                K230_Buffer.ZeroCapturePending = 0;
+            }
+
+            K230_Buffer.Error_x = K230_ClampInt16(Position_x - K230_Buffer.Zero_x);
+            K230_Buffer.Error_y = K230_ClampInt16(Position_y - K230_Buffer.Zero_y);
             return 1;
         }
     }
@@ -108,6 +138,17 @@ uint8_t K230_GetFlag(void)
     K230_Buffer.BufferFlag = 0;
     if(!Primask) __enable_irq();
     return Temp;
+}
+
+void K230_ResetZero(void)
+{
+    K230_Buffer.ZeroCapturePending = 1;
+    K230_Buffer.ZeroReady = 0;
+}
+
+uint8_t K230_IsZeroReady(void)
+{
+    return K230_Buffer.ZeroReady;
 }
 
 /**

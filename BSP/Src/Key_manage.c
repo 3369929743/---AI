@@ -30,6 +30,7 @@ void Key_Global_Callback(Key_t *Key, Key_Event_e Event){
         Task_Ball_Contral_Toggle();
         break;
       case KEY_EVENT_DOUBLE_PRESS:
+        Task_Ball_Reset_Zero();
         break;
       case KEY_EVENT_LONG_PRESS:
         break;
