@@ -60,6 +60,19 @@ static uint8_t Task_Ball_Minus_Release_Frames = 0;
 static PID_val Task_Ball_Plus_Endpoint_x = 0.0f;
 static PID_val Task_Ball_Minus_Final_Target_x = 0.0f;
 static PID_val Task_Ball_Minus_Target_Trim = 0.0f;
+static uint8_t Task_Ball_Use_Inertia_Hold = 0;
+
+static void Task_Ball_Select_Control(uint8_t Use_Inertia_Hold){
+    if(Task_Ball_Use_Inertia_Hold == Use_Inertia_Hold) return;
+
+    Task_Ball_Use_Inertia_Hold = Use_Inertia_Hold;
+    if(Use_Inertia_Hold){
+        BallContral_Hold_Mode_Init(&BallContral);
+    }
+    else{
+        BallContral_Position_Mode_Init(&BallContral);
+    }
+}
 
 static PID_val Task_Ball_Abs(PID_val Value){
     return (Value < 0.0f) ? -Value : Value;
@@ -287,7 +300,12 @@ static void Task_Ball_Process_New_Frame(void){
     Task_Ball_Trajectory_Prepare(Position);
     /* Switch the target before calculating this frame's PID output. */
     Task_Ball_Trajectory_Update(Position);
-    BallContral_Run(&BallContral, Position);
+    if(Task_Ball_Use_Inertia_Hold){
+        BallContral_Run_Inertia_Hold(&BallContral, Position);
+    }
+    else{
+        BallContral_Run(&BallContral, Position);
+    }
 }
 
 void Task_Ball_Contral_Init(void){
@@ -295,7 +313,6 @@ void Task_Ball_Contral_Init(void){
     Serial_Init(&Serial_Emm_Ball, Serial_1);
     BallContral_Init(&BallContral, &Serial_K230, &Serial_Emm_Ball, &PID_Ball_Confg);
     K230_Init(&Serial_K230, 0, 0);
-    K230_ResetZero();
 
     SoftTimer_Init(&SoftTimer_K230, SOFTTIMER_MODE_PERIODIC, K230_FRAME_TIMEOUT_MS);
 
@@ -310,6 +327,8 @@ void Task_Ball_Contral_Init(void){
 void Task_Ball_Contral_Toggle(void){
     if(Task_Ball_Contral_State == TASK_BALL_CONTRAL_IDLE){
         Task_Ball_Trajectory_Cancel();
+        K230_ResetZero();
+        Task_Ball_Select_Control(1);
         SoftTimer_Reset(&SoftTimer_K230);
         Task_Ball_Contral_State = TASK_BALL_CONTRAL_RUNNING;
         BallContral_Start(&BallContral);
@@ -326,10 +345,6 @@ void Task_Ball_Contral_Loop(void){
 
     switch(Task_Ball_Contral_State){
         case TASK_BALL_CONTRAL_IDLE:
-            if(K230_Error_Update()){
-                Task_Ball_Last_Vision_Frame_Tick = HAL_GetTick();
-                SoftTimer_Reset(&SoftTimer_K230);
-            }
             break;
         case TASK_BALL_CONTRAL_RUNNING:
             if(K230_Error_Update()){
@@ -381,16 +396,19 @@ void Task_Ball_Contral_Pop_Restore(void){
 
 void Task_Ball_Goto5cm(void){
     Task_Ball_Trajectory_Cancel();
+    Task_Ball_Select_Control(0);
     BallContral_Set_Target(&BallContral, BALL_5CM_OFFSET);
 }
 
 void Task_Ball_GotoMinus5cm(void){
     Task_Ball_Trajectory_Cancel();
+    Task_Ball_Select_Control(0);
     BallContral_Set_Target(&BallContral, -BALL_5CM_OFFSET);
 }
 
 void Task_Ball_Start_5cm_Sequence(void){
     /* Discard a frame buffered before the trigger, then wait for a fresh origin. */
+    Task_Ball_Select_Control(0);
     (void)K230_GetFlag();
     SoftTimer_Reset(&SoftTimer_K230);
     Task_Ball_Trajectory_State = TASK_BALL_TRAJECTORY_WAIT_ORIGIN;
@@ -403,8 +421,10 @@ void Task_Ball_Start_5cm_Sequence(void){
     }
 }
 
+/* Compatibility API used by the current key mapping; not part of the trajectory. */
 void Task_Ball_Reset_Zero(void){
     Task_Ball_Trajectory_Cancel();
+    Task_Ball_Select_Control(1);
     K230_ResetZero();
     SoftTimer_Reset(&SoftTimer_K230);
     BallContral_Clear_Integral(&BallContral);
