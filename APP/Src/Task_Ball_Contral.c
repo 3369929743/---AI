@@ -24,6 +24,18 @@
 #define BALL_ENDPOINT_STABLE_MS         200U
 #define K230_FRAME_TIMEOUT_MS           250U
 
+/*
+ * IMU disturbance feedforward. Acceleration is in the JY61P raw scale
+ * (2048 counts is approximately 1 g). Flip BALL_IMU_FF_POLARITY if +Ay is
+ * mounted opposite to the vision +x direction.
+ */
+#define BALL_IMU_FF_POLARITY            (1.0f)
+#define BALL_IMU_FF_GAIN                 0.10f
+#define BALL_IMU_FF_DEADBAND             10.0f
+#define BALL_IMU_FF_OUTPUT_LIMIT         40.0f
+#define BALL_IMU_FF_FILTER_TAU_MS        25.0f
+#define BALL_IMU_FF_TIMEOUT_MS           250U
+
 typedef enum{
     TASK_BALL_TRAJECTORY_IDLE = 0,
     TASK_BALL_TRAJECTORY_WAIT_ORIGIN,
@@ -73,6 +85,9 @@ static PID_val Task_Ball_Plus_Endpoint_x = 0.0f;
 static PID_val Task_Ball_Minus_Final_Target_x = 0.0f;
 static PID_val Task_Ball_Minus_Target_Trim = 0.0f;
 static uint8_t Task_Ball_Use_Position_Hold = 0;
+static PID_val Task_Ball_IMU_Accel_Filtered = 0.0f;
+static uint32_t Task_Ball_IMU_Last_Tick = 0;
+static uint8_t Task_Ball_IMU_Has_Sample = 0;
 
 static void Task_Ball_Select_Control(uint8_t Use_Position_Hold){
     if(Task_Ball_Use_Position_Hold == Use_Position_Hold) return;
@@ -96,6 +111,16 @@ static PID_val Task_Ball_Clamp(PID_val Value, PID_val Min, PID_val Max){
     if(Value > Max) return Max;
     if(Value < Min) return Min;
     return Value;
+}
+
+static void Task_Ball_IMU_Feedforward_Timeout_Update(void){
+    if(Task_Ball_IMU_Has_Sample
+       && (uint32_t)(HAL_GetTick() - Task_Ball_IMU_Last_Tick)
+          > BALL_IMU_FF_TIMEOUT_MS){
+        Task_Ball_IMU_Has_Sample = 0;
+        Task_Ball_IMU_Accel_Filtered = 0.0f;
+        BallContral_Set_Feedforward_Output(&BallContral, 0.0f);
+    }
 }
 
 static void Task_Ball_Endpoint_Tracking_Reset(void){
@@ -357,6 +382,8 @@ void Task_Ball_Contral_Toggle(void){
 void Task_Ball_Contral_Loop(void){
     uint8_t Has_New_Frame = 0;
 
+    Task_Ball_IMU_Feedforward_Timeout_Update();
+
     switch(Task_Ball_Contral_State){
         case TASK_BALL_CONTRAL_IDLE:
             break;
@@ -388,6 +415,57 @@ void Task_Ball_Contral_Loop(void){
             }
             break;
     }
+}
+
+void Task_Ball_Contral_Update_Acceleration(int32_t AccelAy){
+    uint32_t Now = HAL_GetTick();
+    PID_val Accel = (PID_val)AccelAy;
+    PID_val Effective_Accel;
+    PID_val Feedforward;
+
+    if(!Task_Ball_IMU_Has_Sample){
+        Task_Ball_IMU_Accel_Filtered = Accel;
+        Task_Ball_IMU_Has_Sample = 1;
+    }
+    else{
+        uint32_t Dt_ms = Now - Task_Ball_IMU_Last_Tick;
+        PID_val Alpha;
+
+        if(Dt_ms > BALL_IMU_FF_TIMEOUT_MS){
+            Task_Ball_IMU_Accel_Filtered = Accel;
+        }
+        else if(Dt_ms > 0U){
+            Alpha = (PID_val)Dt_ms
+                  / (BALL_IMU_FF_FILTER_TAU_MS + (PID_val)Dt_ms);
+            Task_Ball_IMU_Accel_Filtered += Alpha
+                * (Accel - Task_Ball_IMU_Accel_Filtered);
+        }
+    }
+    Task_Ball_IMU_Last_Tick = Now;
+
+    if(Task_Ball_IMU_Accel_Filtered > BALL_IMU_FF_DEADBAND){
+        Effective_Accel = Task_Ball_IMU_Accel_Filtered
+                        - BALL_IMU_FF_DEADBAND;
+    }
+    else if(Task_Ball_IMU_Accel_Filtered < -BALL_IMU_FF_DEADBAND){
+        Effective_Accel = Task_Ball_IMU_Accel_Filtered
+                        + BALL_IMU_FF_DEADBAND;
+    }
+    else{
+        Effective_Accel = 0.0f;
+    }
+
+    Feedforward = BALL_IMU_FF_POLARITY
+                * BALL_IMU_FF_GAIN
+                * Effective_Accel;
+    Feedforward = Task_Ball_Clamp(Feedforward,
+                                  -BALL_IMU_FF_OUTPUT_LIMIT,
+                                   BALL_IMU_FF_OUTPUT_LIMIT);
+    BallContral_Set_Feedforward_Output(&BallContral, Feedforward);
+}
+
+float Task_Ball_Contral_Get_Feedforward(void){
+    return (float)BallContral.Feedforward_Output;
 }
 
 void Task_Ball_Contral_Tick(void){

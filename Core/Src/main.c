@@ -60,7 +60,7 @@ uint8_t j = 0;
 uint32_t OLED_Last_Update = 0;
 extern DO_Device_t Laser;
 Serial_t Serial_JY61P;
-JY61P_Accel_t Accel;
+JY61P_CalibratedAccel_t Accel_Calibrated;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -119,7 +119,8 @@ int main(void)
   /* USER CODE BEGIN 2 */
   Key_Glabal_Init();
   OLED_Init();
-  OLED_ShowString(1, 1, "Hello World!");
+  OLED_ShowString(1, 1, "IMU CAL         ");
+  OLED_ShowString(2, 1, "N:000/000       ");
   Serial_Init(&Serial_JY61P, Serial_5);
   JY61P_Init(&Serial_JY61P);
   Task_Ball_Contral_Init();
@@ -138,9 +139,28 @@ int main(void)
     Key_Global_Trigger_Event();
     Task_Ball_Contral_Loop();
     if(JY61P_Accel_Update()){
-      JY61P_Get_Accel(&Accel);
-      OLED_ShowString(2, 1, "Ay:        ");
-      OLED_ShowSignedNum(2, 5, Accel.Ay, 6);
+      if(JY61P_Is_Calibrated()){
+        JY61P_Get_Calibrated_Accel(&Accel_Calibrated);
+        Task_Ball_Contral_Update_Acceleration(Accel_Calibrated.Ay);
+      }
+    }
+
+    if((uint32_t)(HAL_GetTick() - OLED_Last_Update) >= 100U){
+      OLED_Last_Update = HAL_GetTick();
+      if(JY61P_Is_Calibrated()){
+        JY61P_Get_Calibrated_Accel(&Accel_Calibrated);
+        OLED_ShowString(1, 1, "IMU READY       ");
+        OLED_ShowString(2, 1, "Ay:             ");
+        OLED_ShowSignedNum(2, 5, Accel_Calibrated.Ay, 5);
+        OLED_ShowString(3, 1, "FF:             ");
+        OLED_ShowSignedNum(3, 5, (int32_t)(Task_Ball_Contral_Get_Feedforward() * 10.0f + 0.5f), 5);
+      }
+      else{
+        OLED_ShowString(1, 1, "IMU CAL         ");
+        OLED_ShowString(2, 1, "N:000/000       ");
+        OLED_ShowNum(2, 3, JY61P_Get_Calibration_Count(), 3);
+        OLED_ShowNum(2, 7, JY61P_Get_Calibration_Target(), 3);
+      }
     }
   }
   /* USER CODE END 3 */
