@@ -32,6 +32,8 @@
 #include "K230.h"
 #include "DO_Device.h"
 #include "Task_Ball_Contral.h"
+#include "JY61P.h"
+#include "Serial.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -57,6 +59,8 @@ uint8_t i = 0;
 uint8_t j = 0;
 uint32_t OLED_Last_Update = 0;
 extern DO_Device_t Laser;
+Serial_t Serial_JY61P;
+JY61P_Accel_t Accel;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -111,10 +115,13 @@ int main(void)
   MX_USART3_UART_Init();
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
+  MX_UART5_Init();
   /* USER CODE BEGIN 2 */
   Key_Glabal_Init();
   OLED_Init();
   OLED_ShowString(1, 1, "Hello World!");
+  Serial_Init(&Serial_JY61P, Serial_5);
+  JY61P_Init(&Serial_JY61P);
   Task_Ball_Contral_Init();
   Task_Ball_Contral_Pop_Init();
   Timer_Init(&Timer_Tick, Timer_14);
@@ -130,24 +137,10 @@ int main(void)
     /* USER CODE BEGIN 3 */
     Key_Global_Trigger_Event();
     Task_Ball_Contral_Loop();
-
-    if((uint32_t)(HAL_GetTick() - OLED_Last_Update) >= 50U){
-      uint32_t Vision_Frame_Age;
-
-      OLED_Last_Update = HAL_GetTick();
-      Vision_Frame_Age = Task_Ball_Get_Vision_Frame_Age();
-      if(Vision_Frame_Age > 9999U) Vision_Frame_Age = 9999U;
-
-      OLED_ShowChar(1, 1, 'C');
-      OLED_ShowNum(1, 2, Task_Ball_Get_Control_State(), 1);
-      OLED_ShowChar(1, 4, 'T');
-      OLED_ShowNum(1, 5, Task_Ball_Get_Trajectory_State(), 1);
-      OLED_ShowChar(1, 7, 'A');
-      OLED_ShowNum(1, 8, Vision_Frame_Age, 4);
-      OLED_ShowChar(2, 1, 'G');
-      OLED_ShowSignedNum(2, 2, Task_Ball_Get_Target_x(), 4);
-      OLED_ShowSignedNum(3, 1, K230_GetError_x(), 4);
-      OLED_ShowSignedNum(4, 1, K230_GetError_y(), 4);
+    if(JY61P_Accel_Update()){
+      JY61P_Get_Accel(&Accel);
+      OLED_ShowString(2, 1, "Ay:        ");
+      OLED_ShowSignedNum(2, 5, Accel.Ay, 6);
     }
   }
   /* USER CODE END 3 */

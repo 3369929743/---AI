@@ -79,6 +79,8 @@ void Error_Handler(void);
 #define Key3_GPIO_Port GPIOA
 #define Key4_Pin GPIO_PIN_1
 #define Key4_GPIO_Port GPIOD
+#define JY61P__Pin GPIO_PIN_2
+#define JY61P__GPIO_Port GPIOD
 
 /* USER CODE BEGIN Private defines */
 

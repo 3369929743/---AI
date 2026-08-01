@@ -63,7 +63,6 @@ static PID_Confg_t PID_Ball_Hold_Confg = {
 static Task_Ball_Contral_State_e Task_Ball_Contral_State = TASK_BALL_CONTRAL_IDLE;
 static Task_Ball_Trajectory_State_e Task_Ball_Trajectory_State = TASK_BALL_TRAJECTORY_IDLE;
 static PID_val Task_Ball_Origin_x = 0.0f;
-static uint32_t Task_Ball_Last_Vision_Frame_Tick = 0;
 static PID_val Task_Ball_Endpoint_Anchor_x = 0.0f;
 static uint32_t Task_Ball_Endpoint_Stable_Tick = 0;
 static uint8_t Task_Ball_Endpoint_Tracking = 0;
@@ -336,7 +335,6 @@ void Task_Ball_Contral_Init(void){
 
     BallContral_Set_Target(&BallContral, 0);
     Task_Ball_Contral_State = TASK_BALL_CONTRAL_IDLE;
-    Task_Ball_Last_Vision_Frame_Tick = HAL_GetTick();
     Task_Ball_Trajectory_Cancel();
 }
 
@@ -364,7 +362,6 @@ void Task_Ball_Contral_Loop(void){
             break;
         case TASK_BALL_CONTRAL_RUNNING:
             if(K230_Error_Update()){
-                Task_Ball_Last_Vision_Frame_Tick = HAL_GetTick();
                 SoftTimer_Reset(&SoftTimer_K230);
                 Has_New_Frame = 1;
             }
@@ -384,7 +381,6 @@ void Task_Ball_Contral_Loop(void){
         case TASK_BALL_CONTRAL_LOST:
             BallContral_Stop(&BallContral);
             if(K230_Error_Update()){
-                Task_Ball_Last_Vision_Frame_Tick = HAL_GetTick();
                 SoftTimer_Reset(&SoftTimer_K230);
                 BallContral_Start(&BallContral);
                 Task_Ball_Contral_State = TASK_BALL_CONTRAL_RUNNING;
@@ -445,20 +441,4 @@ void Task_Ball_Reset_Zero(void){
     SoftTimer_Reset(&SoftTimer_K230);
     BallContral_Clear_Integral(&BallContral);
     BallContral_Set_Target(&BallContral, 0);
-}
-
-uint8_t Task_Ball_Get_Control_State(void){
-    return (uint8_t)Task_Ball_Contral_State;
-}
-
-uint8_t Task_Ball_Get_Trajectory_State(void){
-    return (uint8_t)Task_Ball_Trajectory_State;
-}
-
-uint32_t Task_Ball_Get_Vision_Frame_Age(void){
-    return HAL_GetTick() - Task_Ball_Last_Vision_Frame_Tick;
-}
-
-int16_t Task_Ball_Get_Target_x(void){
-    return (int16_t)BallContral.PID_StepMotor.Target;
 }
