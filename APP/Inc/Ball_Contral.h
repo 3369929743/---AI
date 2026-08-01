@@ -19,9 +19,6 @@ typedef struct BallContral_Struct{
     PID_val Ball_Velocity;
     uint32_t Last_Frame_Tick;
     uint8_t Has_Ball_History;
-    uint8_t Fast_Boost_Armed;
-    uint8_t Fast_Boost_Active;
-    uint8_t Fast_Boost_Settle_Frames;
     PID_val Hold_Target;
 }BallContral_t;
 
@@ -31,7 +28,7 @@ void BallContral_Clear_Integral(BallContral_t *BallContral);
 void BallContral_Run(BallContral_t *BallContral, PID_val Target);
 void BallContral_Position_Mode_Init(BallContral_t *BallContral);
 void BallContral_Hold_Mode_Init(BallContral_t *BallContral);
-void BallContral_Run_Inertia_Hold(BallContral_t *BallContral, PID_val Target);
+void BallContral_Run_Position_Hold(BallContral_t *BallContral, PID_val Target);
 uint8_t BallContral_Get_is_Enable(BallContral_t *BallContral);
 void BallContral_Start(BallContral_t *BallContral);
 void BallContral_Stop(BallContral_t *BallContral);

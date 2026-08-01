@@ -49,13 +49,13 @@ static PID_Confg_t PID_Ball_5cm_Confg = {
     .Alpha = 1.0
 };
 
-/* Position hold: velocity damping/feed-forward is gated by outward motion. */
+/* Position hold: filtered damping is active during escape and return. */
 static PID_Confg_t PID_Ball_Hold_Confg = {
-    .Kp = 0.9,
-    .Ki = 0.7,
+    .Kp = 2.5,
+    .Ki = 0.45,
     .Kd = 0.45,
-    .IntMax = 40,
-    .IntMin = -40,
+    .IntMax = 60,
+    .IntMin = -60,
     .OutMax = 220,
     .Alpha = 1.0
 };
@@ -73,13 +73,13 @@ static uint8_t Task_Ball_Minus_Release_Frames = 0;
 static PID_val Task_Ball_Plus_Endpoint_x = 0.0f;
 static PID_val Task_Ball_Minus_Final_Target_x = 0.0f;
 static PID_val Task_Ball_Minus_Target_Trim = 0.0f;
-static uint8_t Task_Ball_Use_Inertia_Hold = 0;
+static uint8_t Task_Ball_Use_Position_Hold = 0;
 
-static void Task_Ball_Select_Control(uint8_t Use_Inertia_Hold){
-    if(Task_Ball_Use_Inertia_Hold == Use_Inertia_Hold) return;
+static void Task_Ball_Select_Control(uint8_t Use_Position_Hold){
+    if(Task_Ball_Use_Position_Hold == Use_Position_Hold) return;
 
-    Task_Ball_Use_Inertia_Hold = Use_Inertia_Hold;
-    if(Use_Inertia_Hold){
+    Task_Ball_Use_Position_Hold = Use_Position_Hold;
+    if(Use_Position_Hold){
         PID_Init(&BallContral.PID_StepMotor, &PID_Ball_Hold_Confg);
         BallContral_Hold_Mode_Init(&BallContral);
     }
@@ -315,8 +315,8 @@ static void Task_Ball_Process_New_Frame(void){
     Task_Ball_Trajectory_Prepare(Position);
     /* Switch the target before calculating this frame's PID output. */
     Task_Ball_Trajectory_Update(Position);
-    if(Task_Ball_Use_Inertia_Hold){
-        BallContral_Run_Inertia_Hold(&BallContral, Position);
+    if(Task_Ball_Use_Position_Hold){
+        BallContral_Run_Position_Hold(&BallContral, Position);
     }
     else{
         BallContral_Run(&BallContral, Position);
