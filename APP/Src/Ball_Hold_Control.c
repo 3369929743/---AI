@@ -1,25 +1,35 @@
 #include "Ball_Contral.h"
 #include "main.h"
 
-#define BALL_HOLD_VELOCITY_FILTER_TAU_MS 30.0f
+#define BALL_HOLD_VELOCITY_FILTER_TAU_MS 18.0f
 #define BALL_FRAME_DT_MIN_MS 2U
 #define BALL_FRAME_DT_MAX_MS 200U
 #define BALL_INTEGRAL_ERROR_LIMIT 28.0f
 #define BALL_INTEGRAL_SPEED_LIMIT 120.0f
 #define BALL_PID_OUTPUT_POLARITY (-1.0f)
 #define BALL_POSITION_UNITS_PER_CM 27.6f
-#define BALL_POSITION_LEAD_TIME_S 0.035f
-#define BALL_POSITION_LEAD_LIMIT (1.0f * BALL_POSITION_UNITS_PER_CM)
-#define BALL_FAST_ERROR_ON (0.65f * BALL_POSITION_UNITS_PER_CM)
-#define BALL_FAST_VELOCITY_ON 150.0f
-#define BALL_FAST_KP_SCALE 1.55f
-#define BALL_FAST_KD_SCALE 1.75f
+#define BALL_POSITION_LEAD_TIME_S 0.050f
+#define BALL_POSITION_LEAD_LIMIT (1.2f * BALL_POSITION_UNITS_PER_CM)
+#define BALL_PREDICT_ERROR_ON (0.10f * BALL_POSITION_UNITS_PER_CM)
+#define BALL_PREDICT_VELOCITY_ON 30.0f
+#define BALL_FAST_ERROR_ON (0.35f * BALL_POSITION_UNITS_PER_CM)
+#define BALL_FAST_VELOCITY_ON 70.0f
+#define BALL_FAST_KP_SCALE 1.85f
+#define BALL_FAST_KD_SCALE 2.05f
 #define BALL_FAST_MOVING_AWAY_KD_SCALE 1.20f
 #define BALL_FAST_OUTPUT_LIMIT 300.0f
 #define BALL_FAST_INTEGRAL_DECAY 0.85f
 #define BALL_FAST_REARM_ERROR (0.30f * BALL_POSITION_UNITS_PER_CM)
 #define BALL_FAST_REARM_VELOCITY 30.0f
 #define BALL_FAST_REARM_FRAMES 3U
+#define BALL_FAST_RETRIGGER_ERROR (0.15f * BALL_POSITION_UNITS_PER_CM)
+#define BALL_FAST_RETRIGGER_VELOCITY 35.0f
+#define BALL_FAST_STALL_ERROR (0.65f * BALL_POSITION_UNITS_PER_CM)
+#define BALL_FAST_STALL_VELOCITY 20.0f
+#define BALL_FAST_ESCAPE_ERROR (0.85f * BALL_POSITION_UNITS_PER_CM)
+#define BALL_FAST_EXIT_VELOCITY 60.0f
+#define BALL_HOLD_EMERGENCY_ERROR (0.65f * BALL_POSITION_UNITS_PER_CM)
+#define BALL_HOLD_EMERGENCY_MIN_OUTPUT 160.0f
 #define BALL_APPROACH_ERROR_ON (1.50f * BALL_POSITION_UNITS_PER_CM)
 #define BALL_APPROACH_VELOCITY_ON 35.0f
 #define BALL_APPROACH_KP_SCALE 0.85f
@@ -34,8 +44,8 @@
 #define BALL_HOLD_OUTPUT_STEP_LIMIT 80
 #define BALL_POSITION_MOTOR_SPEED 500U
 #define BALL_POSITION_MOTOR_ACC 0U
-#define BALL_HOLD_MOTOR_SPEED 900U
-#define BALL_HOLD_MOTOR_ACC 200U
+#define BALL_HOLD_MOTOR_SPEED 1100U
+#define BALL_HOLD_MOTOR_ACC 240U
 
 static PID_val BallContral_Hold_Abs(PID_val Value)
 {
@@ -94,8 +104,13 @@ static PID_val BallContral_Calculate_Inertia_Hold(BallContral_t *BallContral,
     PID_val Abs_Position_Error;
     PID_val Derivative_Term;
     uint8_t Fast_Response;
+    uint8_t Predict_Response;
     uint8_t Moving_Away;
     uint8_t Moving_Toward;
+    uint8_t Renewed_Disturbance;
+    uint8_t Recovery_Stalled;
+    uint8_t Escaped_From_Target;
+    uint8_t Emergency_Response;
     uint8_t Approach_Response;
 
     if(!BallContral->Has_Ball_History){
@@ -128,6 +143,16 @@ static PID_val BallContral_Calculate_Inertia_Hold(BallContral_t *BallContral,
     Abs_Position_Error = BallContral_Hold_Abs(Position_Error);
     Moving_Away = (Position_Error * BallContral->Ball_Velocity) < 0.0f;
     Moving_Toward = (Position_Error * BallContral->Ball_Velocity) > 0.0f;
+    Predict_Response = Moving_Away
+                    && Abs_Position_Error >= BALL_PREDICT_ERROR_ON
+                    && Abs_Velocity >= BALL_PREDICT_VELOCITY_ON;
+    Renewed_Disturbance = Moving_Away
+                       && Abs_Position_Error >= BALL_FAST_RETRIGGER_ERROR
+                       && Abs_Velocity >= BALL_FAST_RETRIGGER_VELOCITY;
+    Recovery_Stalled = Abs_Position_Error >= BALL_FAST_STALL_ERROR
+                    && Abs_Velocity <= BALL_FAST_STALL_VELOCITY;
+    Escaped_From_Target = Moving_Away
+                       && Abs_Position_Error >= BALL_FAST_ESCAPE_ERROR;
 
     if(Abs_Position_Error <= BALL_FAST_REARM_ERROR
        && Abs_Velocity <= BALL_FAST_REARM_VELOCITY){
@@ -144,21 +169,39 @@ static PID_val BallContral_Calculate_Inertia_Hold(BallContral_t *BallContral,
     }
 
     if(BallContral->Fast_Boost_Active){
-        if(Moving_Toward && Abs_Position_Error <= BALL_APPROACH_ERROR_ON){
+        /* Do not drop the catch gain on a noisy one-frame direction change. */
+        if(Moving_Toward
+           && Abs_Velocity >= BALL_FAST_EXIT_VELOCITY
+           && Abs_Position_Error <= BALL_APPROACH_ERROR_ON){
             BallContral->Fast_Boost_Active = 0;
             BallContral->Fast_Boost_Armed = 0;
         }
     }
-    else if(BallContral->Fast_Boost_Armed
+    else{
+        /*
+         * A moving vehicle can disturb the ball again before it has settled
+         * inside the small re-arm window.  Re-enter the catch phase when the
+         * error starts growing again, or when recovery has visibly stalled.
+         * Prediction is still applied only while Moving_Away is true.
+         */
+        if((BallContral->Fast_Boost_Armed
             && (Abs_Position_Error >= BALL_FAST_ERROR_ON
-                || (Moving_Away && Abs_Velocity >= BALL_FAST_VELOCITY_ON))){
-        BallContral->Fast_Boost_Active = 1;
+                || (Moving_Away && Abs_Velocity >= BALL_FAST_VELOCITY_ON)
+                || Predict_Response))
+           || Renewed_Disturbance
+           || Recovery_Stalled
+           || Escaped_From_Target){
+            BallContral->Fast_Boost_Active = 1;
+        }
     }
     Fast_Response = BallContral->Fast_Boost_Active;
 
-    /* Predict only while the disturbance is carrying the ball away. */
+    /*
+     * Start velocity lead before the larger catch pulse is required.  This
+     * keeps inertial prediction responsive without applying it on the return.
+     */
     Position_Lead = 0.0f;
-    if(Fast_Response && Moving_Away){
+    if(Predict_Response || (Fast_Response && Moving_Away)){
         Position_Lead = BallContral->Ball_Velocity * BALL_POSITION_LEAD_TIME_S;
         Position_Lead = BallContral_Hold_Clamp(Position_Lead,
                                                -BALL_POSITION_LEAD_LIMIT,
@@ -171,6 +214,9 @@ static PID_val BallContral_Calculate_Inertia_Hold(BallContral_t *BallContral,
     PID->Cur_Error = PID->Target - PID->Actual;
     PID->Error_Rate_Filter = -BallContral->Ball_Velocity;
     Abs_Error = BallContral_Hold_Abs(PID->Cur_Error);
+    Emergency_Response = Fast_Response
+                      && Moving_Away
+                      && Abs_Error >= BALL_HOLD_EMERGENCY_ERROR;
 
     Approach_Response = Moving_Toward
                      && Abs_Velocity >= BALL_APPROACH_VELOCITY_ON
@@ -218,6 +264,22 @@ static PID_val BallContral_Calculate_Inertia_Hold(BallContral_t *BallContral,
                 * (Kp * PID->Cur_Error
                  + PID->Ki * PID->ErrorInt
                  - Derivative_Term);
+
+    /*
+     * Treat 0.65 cm predicted error as the last recovery boundary before the
+     * 1 cm requirement.  While the ball is still moving away, guarantee a
+     * useful pipe angle instead of waiting for the proportional term to grow.
+     */
+    if(Emergency_Response){
+        if(PID->Cur_Error < 0.0f
+           && PID->Output < BALL_HOLD_EMERGENCY_MIN_OUTPUT){
+            PID->Output = BALL_HOLD_EMERGENCY_MIN_OUTPUT;
+        }
+        else if(PID->Cur_Error > 0.0f
+                && PID->Output > -BALL_HOLD_EMERGENCY_MIN_OUTPUT){
+            PID->Output = -BALL_HOLD_EMERGENCY_MIN_OUTPUT;
+        }
+    }
 
     if(PID->Output > OutputLimit) PID->Output = OutputLimit;
     else if(PID->Output < -OutputLimit) PID->Output = -OutputLimit;
