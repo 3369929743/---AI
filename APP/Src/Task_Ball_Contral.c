@@ -38,13 +38,26 @@ static SoftTimer_t SoftTimer_K230;
 
 static BallContral_t BallContral;
 
-static PID_Confg_t PID_Ball_Confg = {
+/* 5 cm position trajectory: keep its original damping parameters. */
+static PID_Confg_t PID_Ball_5cm_Confg = {
     .Kp = 0.9,
     .Ki = 0.7,
     .Kd = 0.45,
     .IntMax = 40,
     .IntMin = -40,
-    .OutMax = 220
+    .OutMax = 220,
+    .Alpha = 1.0
+};
+
+/* Position hold: velocity damping/feed-forward is gated by outward motion. */
+static PID_Confg_t PID_Ball_Hold_Confg = {
+    .Kp = 0.9,
+    .Ki = 0.7,
+    .Kd = 0.45,
+    .IntMax = 40,
+    .IntMin = -40,
+    .OutMax = 220,
+    .Alpha = 1.0
 };
 
 static Task_Ball_Contral_State_e Task_Ball_Contral_State = TASK_BALL_CONTRAL_IDLE;
@@ -67,9 +80,11 @@ static void Task_Ball_Select_Control(uint8_t Use_Inertia_Hold){
 
     Task_Ball_Use_Inertia_Hold = Use_Inertia_Hold;
     if(Use_Inertia_Hold){
+        PID_Init(&BallContral.PID_StepMotor, &PID_Ball_Hold_Confg);
         BallContral_Hold_Mode_Init(&BallContral);
     }
     else{
+        PID_Init(&BallContral.PID_StepMotor, &PID_Ball_5cm_Confg);
         BallContral_Position_Mode_Init(&BallContral);
     }
 }
@@ -311,7 +326,8 @@ static void Task_Ball_Process_New_Frame(void){
 void Task_Ball_Contral_Init(void){
     Serial_Init(&Serial_K230, Serial_3);
     Serial_Init(&Serial_Emm_Ball, Serial_1);
-    BallContral_Init(&BallContral, &Serial_K230, &Serial_Emm_Ball, &PID_Ball_Confg);
+    BallContral_Init(&BallContral, &Serial_K230, &Serial_Emm_Ball,
+                     &PID_Ball_5cm_Confg);
     K230_Init(&Serial_K230, 0, 0);
 
     SoftTimer_Init(&SoftTimer_K230, SOFTTIMER_MODE_PERIODIC, K230_FRAME_TIMEOUT_MS);
