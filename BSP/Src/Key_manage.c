@@ -1,9 +1,13 @@
 #include "Key_manage.h"
 #include "Key.h"
 #include "Task_Ball_Contral.h"
+#include "Serial.h"
+#include "OLED.h"
 
 static Key_t Key_User, Key1, Key2, Key3, Key4;
 extern uint8_t i;
+extern Serial_t Serial_test;
+uint8_t Data[3] = {0xAA, 0x55, 0x01};
 
 void Key_Global_Callback(Key_t *Key, Key_Event_e Event){
   if(Key == &Key_User){
@@ -43,6 +47,8 @@ void Key_Global_Callback(Key_t *Key, Key_Event_e Event){
   if(Key == &Key2){
     switch (Event) {
       case KEY_EVENT_ONCE_PRESS:
+        Serial_SendArray(&Serial_test, Data, 3);
+        OLED_ShowString(3, 1, "Send: 0xAA 0x55 0x01");
         break;
       case KEY_EVENT_DOUBLE_PRESS:
         break;

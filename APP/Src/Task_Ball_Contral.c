@@ -42,6 +42,25 @@
 
 /* 正向 5 cm 运动超时时间：超过 2 s 后自动切换到负向 5 cm。 */
 #define BALL_PLUS_5CM_TIMEOUT_MS        2000U
+/* 正向 5 cm 超时后，负向折返阶段的电机目标脉冲幅值减小量。 */
+#define BALL_TIMEOUT_MINUS_PULSE_REDUCTION 20.0f
+
+/*
+ * 小车启停事件前馈参数（不使用陀螺仪/加速度计）。
+ * 当前 138 像素约等于 5 cm，因此 1 cm 误差约为 28 像素。
+ *
+ */
+#define BALL_CAR_FF_POLARITY            (1.0f)   /**< 前馈方向极性，若启动后误差反而增大，改为 -1.0f */
+#define BALL_CAR_START_FF_PULSE         25.0f    /**< 启动瞬间附加的管道目标脉冲 */
+#define BALL_CAR_STOP_FF_PULSE          25.0f    /**< 停止瞬间附加的管道目标脉冲 */
+#define BALL_CAR_START_FF_HOLD_MS       200U     /**< 启动前馈峰值维持时间(ms) */
+#define BALL_CAR_START_FF_FADE_MS       300U     /**< 启动前馈从峰值衰减到0的时间(ms) */
+#define BALL_CAR_STOP_FF_HOLD_MS        150U     /**< 停止前馈峰值维持时间(ms) */
+#define BALL_CAR_STOP_FF_FADE_MS        300U     /**< 停止前馈从峰值衰减到0的时间(ms) */
+#define BALL_CAR_FF_OUTPUT_LIMIT        60.0f    /**< 前馈输出上限 */
+#define BALL_CAR_FF_MIN_UPDATE          0.5f     /**< 前馈最小更新间隔(s) */
+
+#define BALL_CAR_FF_READY_DELAY_MS       0U
 
 typedef enum{
     TASK_BALL_TRAJECTORY_IDLE = 0,
@@ -50,6 +69,13 @@ typedef enum{
     TASK_BALL_TRAJECTORY_TO_MINUS_5CM,
     TASK_BALL_TRAJECTORY_HOLD_MINUS_5CM,
 }Task_Ball_Trajectory_State_e;
+
+typedef enum{
+    TASK_BALL_CAR_FF_IDLE = 0,
+    TASK_BALL_CAR_FF_START,
+    TASK_BALL_CAR_FF_RUN,
+    TASK_BALL_CAR_FF_STOP,
+}Task_Ball_Car_FF_State_e;
 
 static Serial_t Serial_K230;
 static Serial_t Serial_Emm_Ball;
@@ -94,6 +120,13 @@ static PID_val Task_Ball_Plus_Endpoint_x = 0.0f;
 static PID_val Task_Ball_Minus_Final_Target_x = 0.0f;
 static PID_val Task_Ball_Minus_Target_Trim = 0.0f;
 static uint8_t Task_Ball_Use_Position_Hold = 0;
+static Task_Ball_Car_FF_State_e Task_Ball_Car_FF_State = TASK_BALL_CAR_FF_IDLE;
+static uint32_t Task_Ball_Car_FF_Start_Tick = 0;
+static PID_val Task_Ball_Car_FF_Applied = 0.0f;
+static uint8_t Task_Ball_Car_Motor_Running = 0;
+static uint8_t Task_Ball_Car_Motor_State_Valid = 0;
+static uint8_t Task_Ball_Car_FF_Ready_Pending = 0;
+static uint32_t Task_Ball_Car_FF_Ready_Tick = 0;
 
 static void Task_Ball_Select_Control(uint8_t Use_Position_Hold){
     if(Task_Ball_Use_Position_Hold == Use_Position_Hold) return;
@@ -117,6 +150,85 @@ static PID_val Task_Ball_Clamp(PID_val Value, PID_val Min, PID_val Max){
     if(Value > Max) return Max;
     if(Value < Min) return Min;
     return Value;
+}
+
+static PID_val Task_Ball_Car_FF_Profile(PID_val Peak,
+                                        uint32_t Elapsed_ms,
+                                        uint32_t Hold_ms,
+                                        uint32_t Fade_ms){
+    if(Elapsed_ms < Hold_ms) return Peak;
+
+    Elapsed_ms -= Hold_ms;
+    if(Elapsed_ms >= Fade_ms || Fade_ms == 0U) return 0.0f;
+
+    return Peak * (PID_val)(Fade_ms - Elapsed_ms) / (PID_val)Fade_ms;
+}
+
+static uint8_t Task_Ball_Car_Feedforward_Apply(PID_val Feedforward){
+    PID_val Change;
+    uint8_t Can_Apply;
+
+    /* 5 cm 轨迹使用独立 PID，不允许小车前馈影响它。 */
+    Can_Apply = Task_Ball_Use_Position_Hold
+             && Task_Ball_Contral_State == TASK_BALL_CONTRAL_RUNNING
+             && BallContral_Get_is_Enable(&BallContral);
+    if(!Can_Apply){
+        Feedforward = 0.0f;
+    }
+
+    Feedforward = Task_Ball_Clamp(Feedforward,
+                                  -BALL_CAR_FF_OUTPUT_LIMIT,
+                                   BALL_CAR_FF_OUTPUT_LIMIT);
+    Change = Task_Ball_Abs(Feedforward - Task_Ball_Car_FF_Applied);
+    if(Feedforward == 0.0f){
+        if(Task_Ball_Car_FF_Applied == 0.0f) return Can_Apply;
+    }
+    else if(Change < BALL_CAR_FF_MIN_UPDATE){
+        return Can_Apply;
+    }
+
+    Task_Ball_Car_FF_Applied = Feedforward;
+    BallContral_Set_Feedforward_Output(&BallContral, Feedforward);
+    return Can_Apply;
+}
+
+static uint8_t Task_Ball_Car_Feedforward_Update(void){
+    uint32_t Elapsed_ms = HAL_GetTick() - Task_Ball_Car_FF_Start_Tick;
+    PID_val Feedforward = 0.0f;
+
+    switch(Task_Ball_Car_FF_State){
+        case TASK_BALL_CAR_FF_START:
+            Feedforward = Task_Ball_Car_FF_Profile(
+                BALL_CAR_FF_POLARITY * BALL_CAR_START_FF_PULSE,
+                Elapsed_ms,
+                BALL_CAR_START_FF_HOLD_MS,
+                BALL_CAR_START_FF_FADE_MS);
+            if(Elapsed_ms >= BALL_CAR_START_FF_HOLD_MS
+                           + BALL_CAR_START_FF_FADE_MS){
+                Task_Ball_Car_FF_State = TASK_BALL_CAR_FF_RUN;
+            }
+            break;
+
+        case TASK_BALL_CAR_FF_STOP:
+            Feedforward = Task_Ball_Car_FF_Profile(
+                -BALL_CAR_FF_POLARITY * BALL_CAR_STOP_FF_PULSE,
+                Elapsed_ms,
+                BALL_CAR_STOP_FF_HOLD_MS,
+                BALL_CAR_STOP_FF_FADE_MS);
+            if(Elapsed_ms >= BALL_CAR_STOP_FF_HOLD_MS
+                           + BALL_CAR_STOP_FF_FADE_MS){
+                Task_Ball_Car_FF_State = TASK_BALL_CAR_FF_IDLE;
+            }
+            break;
+
+        case TASK_BALL_CAR_FF_IDLE:
+        case TASK_BALL_CAR_FF_RUN:
+        default:
+            Feedforward = 0.0f;
+            break;
+    }
+
+    return Task_Ball_Car_Feedforward_Apply(Feedforward);
 }
 
 static void Task_Ball_Endpoint_Tracking_Reset(void){
@@ -171,6 +283,7 @@ static void Task_Ball_Minus_Trim_Target(PID_val Position_Error){
 
 static void Task_Ball_Trajectory_Cancel(void){
     SoftTimer_Stop(&SoftTimer_Ball_Plus_5cm);
+    BallContral_Set_Output_Pulse_Reduction(&BallContral, 0.0f);
     Task_Ball_Trajectory_State = TASK_BALL_TRAJECTORY_IDLE;
     Task_Ball_Endpoint_Tracking_Reset();
     Task_Ball_Minus_Final_Reset();
@@ -290,6 +403,7 @@ static void Task_Ball_Trajectory_Prepare(PID_val Position){
     Task_Ball_Origin_x = Position;
     Task_Ball_Endpoint_Tracking_Reset();
     Task_Ball_Minus_Final_Reset();
+    BallContral_Set_Output_Pulse_Reduction(&BallContral, 0.0f);
     BallContral_Start(&BallContral);
     BallContral_Set_Target(&BallContral, Task_Ball_Origin_x + BALL_5CM_OFFSET);
     SoftTimer_Reset(&SoftTimer_Ball_Plus_5cm);
@@ -304,6 +418,8 @@ static void Task_Ball_Trajectory_Update(PID_val Position){
                                            Task_Ball_Origin_x + BALL_5CM_OFFSET,
                                            1)){
                 SoftTimer_Stop(&SoftTimer_Ball_Plus_5cm);
+                /* 正常到达后折返不减脉冲。 */
+                BallContral_Set_Output_Pulse_Reduction(&BallContral, 0.0f);
                 /* Keep velocity history for a smooth reversal, but discard old integral bias. */
                 BallContral_Clear_Integral(&BallContral);
                 Task_Ball_Minus_Begin_Return(Position);
@@ -342,6 +458,8 @@ static void Task_Ball_Plus5cm_Timeout_Update(void){
      * 以本次起点为基准的负向 5 cm 目标。
      */
     BallContral_Clear_Integral(&BallContral);
+    BallContral_Set_Output_Pulse_Reduction(
+        &BallContral, BALL_TIMEOUT_MINUS_PULSE_REDUCTION);
     Task_Ball_Minus_Begin_Return(Task_Ball_Origin_x + BALL_5CM_OFFSET);
     Task_Ball_Endpoint_Tracking_Reset();
     Task_Ball_Trajectory_State = TASK_BALL_TRAJECTORY_TO_MINUS_5CM;
@@ -378,6 +496,12 @@ void Task_Ball_Contral_Init(void){
     BallContral_Set_Target(&BallContral, 0);
     Task_Ball_Contral_State = TASK_BALL_CONTRAL_IDLE;
     Task_Ball_Last_Vision_Frame_Tick = HAL_GetTick();
+    Task_Ball_Car_FF_State = TASK_BALL_CAR_FF_IDLE;
+    Task_Ball_Car_FF_Applied = 0.0f;
+    Task_Ball_Car_Motor_Running = 0;
+    Task_Ball_Car_Motor_State_Valid = 0;
+    Task_Ball_Car_FF_Ready_Pending = 0;
+    Task_Ball_Car_FF_Ready_Tick = 0;
     Task_Ball_Trajectory_Cancel();
 }
 
@@ -399,6 +523,8 @@ void Task_Ball_Contral_Toggle(void){
 
 void Task_Ball_Contral_Loop(void){
     uint8_t Has_New_Frame = 0;
+
+    Task_Ball_Car_Feedforward_Update();
 
     switch(Task_Ball_Contral_State){
         case TASK_BALL_CONTRAL_IDLE:
@@ -436,6 +562,77 @@ void Task_Ball_Contral_Loop(void){
             }
             break;
     }
+}
+
+uint8_t Task_Ball_Contral_Set_Car_Motor_State(uint8_t IsRunning){
+    uint8_t Feedforward_Applied;
+
+    IsRunning = (IsRunning != 0U) ? 1U : 0U;
+    /* 新命令覆盖尚未回复的旧命令，避免回复错位。 */
+    Task_Ball_Car_FF_Ready_Pending = 0;
+
+    /* 第一次收到停止帧仅同步状态，不产生一次假的制动前馈。 */
+    if(!Task_Ball_Car_Motor_State_Valid){
+        Task_Ball_Car_Motor_State_Valid = 1;
+        Task_Ball_Car_Motor_Running = IsRunning;
+        if(!IsRunning){
+            Task_Ball_Car_FF_State = TASK_BALL_CAR_FF_IDLE;
+            Feedforward_Applied = Task_Ball_Car_Feedforward_Apply(0.0f);
+            if(Feedforward_Applied){
+                Task_Ball_Car_FF_Ready_Pending = 1;
+                Task_Ball_Car_FF_Ready_Tick = HAL_GetTick();
+            }
+            return Feedforward_Applied;
+        }
+    }
+    else{
+        if(IsRunning == Task_Ball_Car_Motor_Running){
+            Feedforward_Applied = Task_Ball_Use_Position_Hold
+                               && Task_Ball_Contral_State == TASK_BALL_CONTRAL_RUNNING
+                               && BallContral_Get_is_Enable(&BallContral);
+            if(Feedforward_Applied){
+                Task_Ball_Car_FF_Ready_Pending = 1;
+                Task_Ball_Car_FF_Ready_Tick = HAL_GetTick();
+            }
+            return Feedforward_Applied;
+        }
+        Task_Ball_Car_Motor_Running = IsRunning;
+    }
+
+    Task_Ball_Car_FF_Start_Tick = HAL_GetTick();
+    Task_Ball_Car_FF_State = IsRunning ?
+                             TASK_BALL_CAR_FF_START :
+                             TASK_BALL_CAR_FF_STOP;
+    /* 收到双主控事件后立即下发第一拍前馈，不等待下一帧视觉数据。 */
+    Feedforward_Applied = Task_Ball_Car_Feedforward_Update();
+    if(Feedforward_Applied){
+        Task_Ball_Car_FF_Ready_Pending = 1;
+        Task_Ball_Car_FF_Ready_Tick = HAL_GetTick();
+    }
+    return Feedforward_Applied;
+}
+
+uint8_t Task_Ball_Contral_Get_Car_Feedforward_Ready(void){
+    if(!Task_Ball_Car_FF_Ready_Pending) return 0;
+
+    if(!Task_Ball_Use_Position_Hold
+       || Task_Ball_Contral_State != TASK_BALL_CONTRAL_RUNNING
+       || !BallContral_Get_is_Enable(&BallContral)){
+        Task_Ball_Car_FF_Ready_Pending = 0;
+        return 0;
+    }
+
+    if((uint32_t)(HAL_GetTick() - Task_Ball_Car_FF_Ready_Tick)
+       < BALL_CAR_FF_READY_DELAY_MS){
+        return 0;
+    }
+
+    Task_Ball_Car_FF_Ready_Pending = 0;
+    return 1;
+}
+
+float Task_Ball_Contral_Get_Car_Feedforward(void){
+    return (float)Task_Ball_Car_FF_Applied;
 }
 
 void Task_Ball_Contral_Tick(void){

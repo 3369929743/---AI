@@ -13,6 +13,68 @@
  */
 #define BALL_MOTOR_COMMAND_DEADBAND_PULSE 3
 
+/*
+ * 将视觉 PID 反馈与小车启停前馈相加，最后统一做输出限幅、
+ * 每帧变化限幅和电机命令死区。前馈因此不会绕过原有保护。
+ */
+static void BallContral_Apply_Combined_Output(BallContral_t *BallContral)
+{
+    PID_val Combined_Output;
+    int32_t New_Target_Pulse;
+    int32_t Output_Step;
+    int32_t Delta_Pulse;
+
+    if(!BallContral->is_Enable) return;
+
+    Combined_Output = BallContral->Feedback_Output
+                    + BallContral->Feedforward_Output;
+    if(Combined_Output > BallContral->PID_StepMotor.OutMax){
+        Combined_Output = BallContral->PID_StepMotor.OutMax;
+    }
+    else if(Combined_Output < BallContral->PID_StepMotor.OutMin){
+        Combined_Output = BallContral->PID_StepMotor.OutMin;
+    }
+
+    /* 超时折返时减小目标脉冲幅值，不改变输出方向。 */
+    if(BallContral->Output_Pulse_Reduction > 0.0f){
+        if(Combined_Output > BallContral->Output_Pulse_Reduction){
+            Combined_Output -= BallContral->Output_Pulse_Reduction;
+        }
+        else if(Combined_Output < -BallContral->Output_Pulse_Reduction){
+            Combined_Output += BallContral->Output_Pulse_Reduction;
+        }
+        else{
+            Combined_Output = 0.0f;
+        }
+    }
+
+    if(Combined_Output >= 0.0f){
+        New_Target_Pulse = (int32_t)(Combined_Output + 0.5f);
+    }
+    else{
+        New_Target_Pulse = (int32_t)(Combined_Output - 0.5f);
+    }
+
+    Output_Step = New_Target_Pulse - BallContral->Pipe_Target_Pulse;
+    if(BallContral->Output_Step_Limit > 0){
+        if(Output_Step > BallContral->Output_Step_Limit){
+            New_Target_Pulse = BallContral->Pipe_Target_Pulse
+                             + BallContral->Output_Step_Limit;
+        }
+        else if(Output_Step < -BallContral->Output_Step_Limit){
+            New_Target_Pulse = BallContral->Pipe_Target_Pulse
+                             - BallContral->Output_Step_Limit;
+        }
+    }
+
+    Delta_Pulse = New_Target_Pulse - BallContral->Pipe_Target_Pulse;
+    if(Delta_Pulse >= BALL_MOTOR_COMMAND_DEADBAND_PULSE
+       || Delta_Pulse <= -BALL_MOTOR_COMMAND_DEADBAND_PULSE){
+        Emm_Pos_Run_Quick(&BallContral->Emm_StepMotor, Delta_Pulse);
+        BallContral->Pipe_Target_Pulse = New_Target_Pulse;
+    }
+}
+
 static PID_val BallContral_Calculate(BallContral_t *BallContral, PID_val Actual)
 {
     PID_t *PID = &BallContral->PID_StepMotor;
@@ -83,6 +145,10 @@ void BallContral_Init(BallContral_t *BallContral, Serial_t *Serial_K230, Serial_
     PID_Init(&BallContral->PID_StepMotor, PID_Confg);
     BallContral->is_Enable = 0;
     BallContral->Pipe_Target_Pulse = 0;
+    BallContral->Feedback_Output = 0.0f;
+    BallContral->Feedforward_Output = 0.0f;
+    BallContral->Output_Step_Limit = 0;
+    BallContral->Output_Pulse_Reduction = 0.0f;
     BallContral->Ball_Position_Pre = 0.0f;
     BallContral->Ball_Velocity = 0.0f;
     BallContral->Last_Frame_Tick = 0;
@@ -111,29 +177,40 @@ void BallContral_Clear_Integral(BallContral_t *BallContral)
     BallContral->PID_StepMotor.ErrorInt = 0.0f;
 }
 
+void BallContral_Set_Output_Step_Limit(BallContral_t *BallContral,
+                                      int32_t StepLimit)
+{
+    BallContral->Output_Step_Limit = (StepLimit > 0) ? StepLimit : 0;
+}
+
+void BallContral_Set_Output_Pulse_Reduction(BallContral_t *BallContral,
+                                           PID_val Reduction)
+{
+    BallContral->Output_Pulse_Reduction =
+        (Reduction > 0.0f) ? Reduction : 0.0f;
+}
+
+void BallContral_Set_Feedback_Output(BallContral_t *BallContral,
+                                    PID_val Output)
+{
+    BallContral->Feedback_Output = Output;
+    BallContral_Apply_Combined_Output(BallContral);
+}
+
+void BallContral_Set_Feedforward_Output(BallContral_t *BallContral,
+                                       PID_val Output)
+{
+    BallContral->Feedforward_Output = Output;
+    BallContral_Apply_Combined_Output(BallContral);
+}
+
 void BallContral_Run(BallContral_t *BallContral, PID_val Target){
     PID_val Emm;
-    int32_t New_Target_Pulse;
-    int32_t Delta_Pulse;
 
     if(!BallContral->is_Enable) return;
 
     Emm = BallContral_Calculate(BallContral, Target);
-
-    /* PID output is the desired pipe offset, not a repeatedly accumulated step. */
-    if(Emm >= 0){
-        New_Target_Pulse = (int32_t)(Emm + 0.5f);
-    }
-    else{
-        New_Target_Pulse = (int32_t)(Emm - 0.5f);
-    }
-
-    Delta_Pulse = New_Target_Pulse - BallContral->Pipe_Target_Pulse;
-    if(Delta_Pulse >= BALL_MOTOR_COMMAND_DEADBAND_PULSE ||
-       Delta_Pulse <= -BALL_MOTOR_COMMAND_DEADBAND_PULSE){
-        Emm_Pos_Run_Quick(&BallContral->Emm_StepMotor, Delta_Pulse);
-        BallContral->Pipe_Target_Pulse = New_Target_Pulse;
-    }
+    BallContral_Set_Feedback_Output(BallContral, Emm);
 }
 
 uint8_t BallContral_Get_is_Enable(BallContral_t *BallContral){
@@ -142,6 +219,8 @@ uint8_t BallContral_Get_is_Enable(BallContral_t *BallContral){
 
 void BallContral_Start(BallContral_t *BallContral){
     PID_Clear(&BallContral->PID_StepMotor);
+    BallContral->Feedback_Output = 0.0f;
+    BallContral->Feedforward_Output = 0.0f;
     BallContral->Ball_Velocity = 0.0f;
     BallContral->Has_Ball_History = 0;
     BallContral->is_Enable = 1;
@@ -153,6 +232,8 @@ void BallContral_Stop(BallContral_t *BallContral){
         BallContral->Pipe_Target_Pulse = 0;
     }
     PID_Clear(&BallContral->PID_StepMotor);
+    BallContral->Feedback_Output = 0.0f;
+    BallContral->Feedforward_Output = 0.0f;
     BallContral->Ball_Velocity = 0.0f;
     BallContral->Has_Ball_History = 0;
     BallContral->is_Enable = 0;

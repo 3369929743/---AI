@@ -62,6 +62,8 @@ uint32_t OLED_Last_Update = 0;
 extern DO_Device_t Laser;
 Serial_t Serial_JY61P;
 JY61P_CalibratedAccel_t Accel_Calibrated;
+uint8_t Car_Motor_Running = 0;
+Serial_t Serial_test;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -97,7 +99,6 @@ int main(void)
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-
   HAL_Init();
 
   /* USER CODE BEGIN Init */
@@ -123,10 +124,7 @@ int main(void)
   Key_Glabal_Init();
   OLED_Init();
   Task_Serial_Init();
-  OLED_ShowString(1, 1, "IMU CAL         ");
-  OLED_ShowString(2, 1, "N:000/000       ");
-  Serial_Init(&Serial_JY61P, Serial_5);
-  JY61P_Init(&Serial_JY61P);
+  Serial_Init(&Serial_test, Serial_5);
   Task_Ball_Contral_Init();
   Task_Ball_Contral_Pop_Init();
   Timer_Init(&Timer_Tick, Timer_14);
@@ -144,8 +142,14 @@ int main(void)
     Task_Ball_Contral_Loop();
 
     Task_Serial_Loop();
-    if(Task_Serial_Get_Pop_Enable()){
-      
+
+    if(Task_Serial_Get_Car_Motor_State(&Car_Motor_Running)){
+      (void)Task_Ball_Contral_Set_Car_Motor_State(Car_Motor_Running);
+    }
+    if(Task_Ball_Contral_Get_Car_Feedforward_Ready()){
+      OLED_ShowString(3, 2, "FF Ready");
+      /* 前馈准备时间结束，通知电机主控可以继续动作。 */
+      Task_Serial_Send_Feedforward_Complete();
     }
   }
   /* USER CODE END 3 */
