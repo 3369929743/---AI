@@ -34,6 +34,7 @@
 #include "Task_Ball_Contral.h"
 #include "JY61P.h"
 #include "Serial.h"
+#include "Task_Serial.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -121,6 +122,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
   Key_Glabal_Init();
   OLED_Init();
+  Task_Serial_Init();
   OLED_ShowString(1, 1, "IMU CAL         ");
   OLED_ShowString(2, 1, "N:000/000       ");
   Serial_Init(&Serial_JY61P, Serial_5);
@@ -140,23 +142,10 @@ int main(void)
     /* USER CODE BEGIN 3 */
     Key_Global_Trigger_Event();
     Task_Ball_Contral_Loop();
-    (void)JY61P_Accel_Update();
 
-    if((uint32_t)(HAL_GetTick() - OLED_Last_Update) >= 100U){
-      OLED_Last_Update = HAL_GetTick();
-      if(JY61P_Is_Calibrated()){
-        JY61P_Get_Calibrated_Accel(&Accel_Calibrated);
-        OLED_ShowString(1, 1, "IMU READY       ");
-        OLED_ShowString(2, 1, "Ay:             ");
-        OLED_ShowSignedNum(2, 5, Accel_Calibrated.Ay, 5);
-        OLED_ShowString(3, 1, "                ");
-      }
-      else{
-        OLED_ShowString(1, 1, "IMU CAL         ");
-        OLED_ShowString(2, 1, "N:000/000       ");
-        OLED_ShowNum(2, 3, JY61P_Get_Calibration_Count(), 3);
-        OLED_ShowNum(2, 7, JY61P_Get_Calibration_Target(), 3);
-      }
+    Task_Serial_Loop();
+    if(Task_Serial_Get_Pop_Enable()){
+      
     }
   }
   /* USER CODE END 3 */
