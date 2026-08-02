@@ -96,6 +96,7 @@ int main(void)
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+
   HAL_Init();
 
   /* USER CODE BEGIN Init */
@@ -116,6 +117,7 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   MX_UART5_Init();
+  MX_UART4_Init();
   /* USER CODE BEGIN 2 */
   Key_Glabal_Init();
   OLED_Init();

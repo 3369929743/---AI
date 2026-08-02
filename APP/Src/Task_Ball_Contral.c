@@ -4,16 +4,29 @@
 #include "Ball_Contral.h"
 #include "SoftTimer.h"
 
+/* 实际 5 cm 对应多少像素 */
 #define BALL_5CM_OFFSET                 138.0f
-#define BALL_TARGET_TOLERANCE           4.0f
-#define BALL_MINUS_SETTLE_TOLERANCE     3.0f
-#define BALL_MINUS_SETTLE_DELTA         3.0f
+
+/* 正向到位容差，当前 4 */
+#define BALL_TARGET_TOLERANCE           10.0f
+
+/* 负端进入保持状态的允许误差，当前 2 太严格 */
+#define BALL_MINUS_SETTLE_TOLERANCE     10.0f
+
+/* 负端静止时允许的帧间像素跳动 */
+#define BALL_MINUS_SETTLE_DELTA         4.0f
+
 #define BALL_MINUS_SETTLE_SPEED         25.0f
 #define BALL_MINUS_SETTLE_MS            650U
 #define BALL_MINUS_SETTLE_FRAMES        8U
-#define BALL_MINUS_RELEASE_TOLERANCE    6.0f
+
+/* 进入保持后，偏差多大才重新恢复控制 */
+#define BALL_MINUS_RELEASE_TOLERANCE    8.0f
+
 #define BALL_MINUS_RELEASE_SPEED        50.0f
-#define BALL_MINUS_RELEASE_FRAMES       3U
+
+/* 连续多少帧超差才退出保持，防止一两帧跳点触发 */
+#define BALL_MINUS_RELEASE_FRAMES       5U
 #define BALL_MINUS_TRIM_WINDOW          24.0f
 #define BALL_MINUS_TRIM_SETTLE_MS       250U
 #define BALL_MINUS_TRIM_GAIN            0.6f
@@ -40,9 +53,9 @@ static BallContral_t BallContral;
 
 /* 5 cm position trajectory: keep its original damping parameters. */
 static PID_Confg_t PID_Ball_5cm_Confg = {
-    .Kp = 0.9,
-    .Ki = 0.7,
-    .Kd = 0.45,
+    .Kp = 0.55,
+    .Ki = 0.0,
+    .Kd = 0.25,
     .IntMax = 40,
     .IntMin = -40,
     .OutMax = 220,
@@ -51,9 +64,9 @@ static PID_Confg_t PID_Ball_5cm_Confg = {
 
 /* Position hold: filtered damping is active during escape and return. */
 static PID_Confg_t PID_Ball_Hold_Confg = {
-    .Kp = 2.5,
-    .Ki = 0.45,
-    .Kd = 0.45,
+    .Kp = 0.8,
+    .Ki = 0.0,
+    .Kd = 0.0,
     .IntMax = 60,
     .IntMin = -60,
     .OutMax = 220,
