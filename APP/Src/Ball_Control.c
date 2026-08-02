@@ -1,76 +1,47 @@
 #include "Ball_Contral.h"
 #include "main.h"
 
-#define BALL_VELOCITY_FILTER_TAU_MS 60.0f
-#define BALL_FRAME_DT_MIN_MS 2U
-#define BALL_FRAME_DT_MAX_MS 200U
-#define BALL_INTEGRAL_ERROR_LIMIT 28.0f
-#define BALL_INTEGRAL_SPEED_LIMIT 120.0f
-#define BALL_PID_OUTPUT_POLARITY (-1.0f)
-#define BALL_MOTOR_COMMAND_DEADBAND_PULSE 3
+/* 视觉速度的一阶低通滤波时间常数。 */
+#define BALL_VELOCITY_FILTER_TAU_MS       60.0f
+#define BALL_FRAME_DT_MIN_MS              2U
+#define BALL_FRAME_DT_MAX_MS              200U
 
-static void BallContral_Apply_Combined_Output(BallContral_t *BallContral)
+/* 电机方向与视觉坐标方向相反。 */
+#define BALL_PID_OUTPUT_POLARITY           (-1.0f)
+
+/* 新旧管道目标相差不足 3 脉冲时不发送电机命令。 */
+#define BALL_MOTOR_COMMAND_DEADBAND_PULSE  3
+
+static PID_val BallContral_Apply_Position_Deadband(PID_val Error,
+                                                   PID_val Deadband)
 {
-    PID_val Combined_Output;
-    int32_t New_Target_Pulse;
-    int32_t Output_Step;
-    int32_t Delta_Pulse;
-
-    if(!BallContral->is_Enable) return;
-
-    Combined_Output = BallContral->Feedback_Output
-                    + BallContral->Feedforward_Output;
-    if(Combined_Output > BallContral->PID_StepMotor.OutMax){
-        Combined_Output = BallContral->PID_StepMotor.OutMax;
-    }
-    else if(Combined_Output < BallContral->PID_StepMotor.OutMin){
-        Combined_Output = BallContral->PID_StepMotor.OutMin;
-    }
-
-    if(Combined_Output >= 0.0f){
-        New_Target_Pulse = (int32_t)(Combined_Output + 0.5f);
-    }
-    else{
-        New_Target_Pulse = (int32_t)(Combined_Output - 0.5f);
-    }
-
-    Output_Step = New_Target_Pulse - BallContral->Pipe_Target_Pulse;
-    if(BallContral->Output_Step_Limit > 0){
-        if(Output_Step > BallContral->Output_Step_Limit){
-            New_Target_Pulse = BallContral->Pipe_Target_Pulse
-                             + BallContral->Output_Step_Limit;
-        }
-        else if(Output_Step < -BallContral->Output_Step_Limit){
-            New_Target_Pulse = BallContral->Pipe_Target_Pulse
-                             - BallContral->Output_Step_Limit;
-        }
-    }
-
-    Delta_Pulse = New_Target_Pulse - BallContral->Pipe_Target_Pulse;
-    if(Delta_Pulse >= BALL_MOTOR_COMMAND_DEADBAND_PULSE
-       || Delta_Pulse <= -BALL_MOTOR_COMMAND_DEADBAND_PULSE){
-        Emm_Pos_Run_Quick(&BallContral->Emm_StepMotor, Delta_Pulse);
-        BallContral->Pipe_Target_Pulse = New_Target_Pulse;
-    }
+    if(Error <= Deadband && Error >= -Deadband) return 0.0f;
+    return Error;
 }
 
-static PID_val BallContral_Calculate(BallContral_t *BallContral, PID_val Actual)
+static PID_val BallContral_Calculate(BallContral_t *BallContral,
+                                     PID_val Actual)
 {
     PID_t *PID = &BallContral->PID_StepMotor;
     uint32_t Now = HAL_GetTick();
     uint32_t Dt_ms = Now - BallContral->Last_Frame_Tick;
     PID_val Dt_s = 0.0f;
+    PID_val Raw_Error;
 
     if(!BallContral->Has_Ball_History){
         BallContral->Ball_Position_Pre = Actual;
         BallContral->Ball_Velocity = 0.0f;
-        BallContral->Has_Ball_History = 1;
+        BallContral->Has_Ball_History = 1U;
     }
     else if(Dt_ms >= BALL_FRAME_DT_MIN_MS && Dt_ms <= BALL_FRAME_DT_MAX_MS){
-        PID_val Alpha = (PID_val)Dt_ms / (BALL_VELOCITY_FILTER_TAU_MS + (PID_val)Dt_ms);
-        PID_val Raw_Velocity = (Actual - BallContral->Ball_Position_Pre) * 1000.0f / (PID_val)Dt_ms;
+        PID_val Alpha = (PID_val)Dt_ms
+                      / (BALL_VELOCITY_FILTER_TAU_MS + (PID_val)Dt_ms);
+        PID_val Raw_Velocity = (Actual - BallContral->Ball_Position_Pre)
+                             * 1000.0f / (PID_val)Dt_ms;
 
-        BallContral->Ball_Velocity += Alpha * (Raw_Velocity - BallContral->Ball_Velocity);
+        BallContral->Ball_Velocity += Alpha
+                                    * (Raw_Velocity
+                                       - BallContral->Ball_Velocity);
         Dt_s = (PID_val)Dt_ms * 0.001f;
     }
     else{
@@ -82,12 +53,13 @@ static PID_val BallContral_Calculate(BallContral_t *BallContral, PID_val Actual)
 
     PID->Actual = Actual;
     PID->Pre_Error = PID->Cur_Error;
-    PID->Cur_Error = PID->Target - PID->Actual;
+    Raw_Error = PID->Target - PID->Actual;
+    PID->Cur_Error = BallContral_Apply_Position_Deadband(
+        Raw_Error,
+        BallContral->Position_Deadband);
     PID->Error_Rate_Filter = -BallContral->Ball_Velocity;
 
-    if(Dt_s > 0.0f
-       && ((PID->Cur_Error >= 0.0f ? PID->Cur_Error : -PID->Cur_Error) <= BALL_INTEGRAL_ERROR_LIMIT)
-       && ((BallContral->Ball_Velocity >= 0.0f ? BallContral->Ball_Velocity : -BallContral->Ball_Velocity) <= BALL_INTEGRAL_SPEED_LIMIT)){
+    if(Dt_s > 0.0f){
         PID->ErrorInt += PID->Cur_Error * Dt_s;
     }
     if(PID->ErrorInt > PID->IntMax) PID->ErrorInt = PID->IntMax;
@@ -104,50 +76,66 @@ static PID_val BallContral_Calculate(BallContral_t *BallContral, PID_val Actual)
     return PID->Output;
 }
 
-/**
-  * @brief  初始化球体控制模块
-  * @param  BallContral: 球体控制结构体指针
-  * @param  Serial_K230: K230串口通信结构体指针
-  * @param  Serial_Emm: Emm步进电机串口通信结构体指针
-  * @param  PID_Confg: PID配置参数结构体指针
-  * @retval 无
-  */
-void BallContral_Init(BallContral_t *BallContral, Serial_t *Serial_K230, Serial_t *Serial_Emm, PID_Confg_t *PID_Confg)
+static void BallContral_Apply_Output(BallContral_t *BallContral,
+                                     PID_val Output)
 {
-    /* 保存串口通信句柄 */
-    BallContral->Serial_K230 = Serial_K230;
-    BallContral->Serial_Emm = Serial_Emm;
+    int32_t New_Target_Pulse;
+    int32_t Delta_Pulse;
 
-    /* 初始化Emm步进电机和PID控制器 */
+    if(Output >= 0.0f){
+        New_Target_Pulse = (int32_t)(Output + 0.5f);
+    }
+    else{
+        New_Target_Pulse = (int32_t)(Output - 0.5f);
+    }
+
+    /* PID 输出表示管道的绝对目标偏移，只发送相对上次目标的差值。 */
+    Delta_Pulse = New_Target_Pulse - BallContral->Pipe_Target_Pulse;
+    if(Delta_Pulse >= BALL_MOTOR_COMMAND_DEADBAND_PULSE
+       || Delta_Pulse <= -BALL_MOTOR_COMMAND_DEADBAND_PULSE){
+        Emm_Pos_Run_Quick(&BallContral->Emm_StepMotor, Delta_Pulse);
+        BallContral->Pipe_Target_Pulse = New_Target_Pulse;
+    }
+}
+
+void BallContral_Init(BallContral_t *BallContral,
+                      Serial_t *Serial_Emm,
+                      PID_Confg_t *PID_Confg)
+{
     Emm_Init(&BallContral->Emm_StepMotor, Serial_Emm);
-    Emm_SetSpeed(&BallContral->Emm_StepMotor, 500);
+    Emm_SetSpeed(&BallContral->Emm_StepMotor, 500U);
     PID_Init(&BallContral->PID_StepMotor, PID_Confg);
-    BallContral->is_Enable = 0;
+
+    BallContral->is_Enable = 0U;
     BallContral->Pipe_Target_Pulse = 0;
-    BallContral->Feedback_Output = 0.0f;
-    BallContral->Feedforward_Output = 0.0f;
-    BallContral->Output_Step_Limit = 0;
+    BallContral->Position_Deadband = 0.0f;
     BallContral->Ball_Position_Pre = 0.0f;
     BallContral->Ball_Velocity = 0.0f;
-    BallContral->Last_Frame_Tick = 0;
-    BallContral->Has_Ball_History = 0;
+    BallContral->Last_Frame_Tick = 0U;
+    BallContral->Has_Ball_History = 0U;
 
-    /* 初始化Emm位置快速控制模式 */
     Emm_Pos_Control_Quick_Init(&BallContral->Emm_StepMotor);
 }
 
-void Ball_Contral_Emm_Quick_Init(BallContral_t *BallContral){
+void Ball_Contral_Emm_Quick_Init(BallContral_t *BallContral)
+{
     Emm_Pos_Control_Quick_Init(&BallContral->Emm_StepMotor);
 }
 
-void Ball_Contral_Pop_Run(BallContral_t *BallContral, int32_t Pulse){
+void Ball_Contral_Pop_Run(BallContral_t *BallContral, int32_t Pulse)
+{
     if(BallContral->is_Enable) return;
     Emm_Pos_Run_Quick(&BallContral->Emm_StepMotor, Pulse);
 }
 
-void BallContral_Set_Target(BallContral_t *BallContral, PID_val Target)
+void BallContral_Set_Target(BallContral_t *BallContral,
+                            PID_val Target,
+                            PID_val Deadband)
 {
     PID_Set_Target(&BallContral->PID_StepMotor, Target);
+    BallContral->Position_Deadband = (Deadband >= 0.0f)
+                                   ? Deadband
+                                   : -Deadband;
 }
 
 void BallContral_Clear_Integral(BallContral_t *BallContral)
@@ -155,57 +143,39 @@ void BallContral_Clear_Integral(BallContral_t *BallContral)
     BallContral->PID_StepMotor.ErrorInt = 0.0f;
 }
 
-void BallContral_Set_Output_Step_Limit(BallContral_t *BallContral,
-                                      int32_t StepLimit)
+void BallContral_Run(BallContral_t *BallContral, PID_val Actual)
 {
-    BallContral->Output_Step_Limit = (StepLimit > 0) ? StepLimit : 0;
-}
-
-void BallContral_Set_Feedback_Output(BallContral_t *BallContral,
-                                    PID_val Output)
-{
-    BallContral->Feedback_Output = Output;
-    BallContral_Apply_Combined_Output(BallContral);
-}
-
-void BallContral_Set_Feedforward_Output(BallContral_t *BallContral,
-                                       PID_val Output)
-{
-    BallContral->Feedforward_Output = Output;
-    BallContral_Apply_Combined_Output(BallContral);
-}
-
-void BallContral_Run(BallContral_t *BallContral, PID_val Target){
-    PID_val Emm;
+    PID_val Output;
 
     if(!BallContral->is_Enable) return;
 
-    Emm = BallContral_Calculate(BallContral, Target);
-    BallContral_Set_Feedback_Output(BallContral, Emm);
+    Output = BallContral_Calculate(BallContral, Actual);
+    BallContral_Apply_Output(BallContral, Output);
 }
 
-uint8_t BallContral_Get_is_Enable(BallContral_t *BallContral){
+uint8_t BallContral_Get_is_Enable(BallContral_t *BallContral)
+{
     return BallContral->is_Enable;
 }
 
-void BallContral_Start(BallContral_t *BallContral){
+void BallContral_Start(BallContral_t *BallContral)
+{
     PID_Clear(&BallContral->PID_StepMotor);
-    BallContral->Feedback_Output = 0.0f;
-    BallContral->Feedforward_Output = 0.0f;
     BallContral->Ball_Velocity = 0.0f;
-    BallContral->Has_Ball_History = 0;
-    BallContral->is_Enable = 1;
+    BallContral->Has_Ball_History = 0U;
+    BallContral->is_Enable = 1U;
 }
 
-void BallContral_Stop(BallContral_t *BallContral){
+void BallContral_Stop(BallContral_t *BallContral)
+{
     if(BallContral->is_Enable && BallContral->Pipe_Target_Pulse != 0){
-        Emm_Pos_Run_Quick(&BallContral->Emm_StepMotor, -BallContral->Pipe_Target_Pulse);
+        Emm_Pos_Run_Quick(&BallContral->Emm_StepMotor,
+                          -BallContral->Pipe_Target_Pulse);
         BallContral->Pipe_Target_Pulse = 0;
     }
+
     PID_Clear(&BallContral->PID_StepMotor);
-    BallContral->Feedback_Output = 0.0f;
-    BallContral->Feedforward_Output = 0.0f;
     BallContral->Ball_Velocity = 0.0f;
-    BallContral->Has_Ball_History = 0;
-    BallContral->is_Enable = 0;
+    BallContral->Has_Ball_History = 0U;
+    BallContral->is_Enable = 0U;
 }

@@ -140,12 +140,7 @@ int main(void)
     /* USER CODE BEGIN 3 */
     Key_Global_Trigger_Event();
     Task_Ball_Contral_Loop();
-    if(JY61P_Accel_Update()){
-      if(JY61P_Is_Calibrated()){
-        JY61P_Get_Calibrated_Accel(&Accel_Calibrated);
-        Task_Ball_Contral_Update_Acceleration(Accel_Calibrated.Ay);
-      }
-    }
+    (void)JY61P_Accel_Update();
 
     if((uint32_t)(HAL_GetTick() - OLED_Last_Update) >= 100U){
       OLED_Last_Update = HAL_GetTick();
@@ -154,8 +149,7 @@ int main(void)
         OLED_ShowString(1, 1, "IMU READY       ");
         OLED_ShowString(2, 1, "Ay:             ");
         OLED_ShowSignedNum(2, 5, Accel_Calibrated.Ay, 5);
-        OLED_ShowString(3, 1, "FF:             ");
-        OLED_ShowSignedNum(3, 5, (int32_t)(Task_Ball_Contral_Get_Feedforward() * 10.0f + 0.5f), 5);
+        OLED_ShowString(3, 1, "                ");
       }
       else{
         OLED_ShowString(1, 1, "IMU CAL         ");
