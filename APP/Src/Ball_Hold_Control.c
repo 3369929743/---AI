@@ -6,7 +6,6 @@
 #define BALL_FRAME_DT_MIN_MS 2U
 #define BALL_FRAME_DT_MAX_MS 200U
 #define BALL_PID_OUTPUT_POLARITY (-1.0f)
-#define BALL_HOLD_COMMAND_DEADBAND_PULSE 3
 #define BALL_HOLD_OUTPUT_STEP_LIMIT 80
 #define BALL_POSITION_MOTOR_SPEED 500U
 #define BALL_POSITION_MOTOR_ACC 0U
@@ -25,6 +24,7 @@ void BallContral_Position_Mode_Init(BallContral_t *BallContral)
     Emm_SetSpeed(&BallContral->Emm_StepMotor, BALL_POSITION_MOTOR_SPEED);
     Emm_SetAcc(&BallContral->Emm_StepMotor, BALL_POSITION_MOTOR_ACC);
     Emm_Pos_Control_Quick_Init(&BallContral->Emm_StepMotor);
+    BallContral_Set_Output_Step_Limit(BallContral, 0);
     BallContral_Hold_Reset_State(BallContral);
 }
 
@@ -33,6 +33,8 @@ void BallContral_Hold_Mode_Init(BallContral_t *BallContral)
     Emm_SetSpeed(&BallContral->Emm_StepMotor, BALL_HOLD_MOTOR_SPEED);
     Emm_SetAcc(&BallContral->Emm_StepMotor, BALL_HOLD_MOTOR_ACC);
     Emm_Pos_Control_Quick_Init(&BallContral->Emm_StepMotor);
+    BallContral_Set_Output_Step_Limit(BallContral,
+                                     BALL_HOLD_OUTPUT_STEP_LIMIT);
     BallContral_Hold_Reset_State(BallContral);
     BallContral->Hold_Target = 0.0f;
     PID_Set_Target(&BallContral->PID_StepMotor, BallContral->Hold_Target);
@@ -116,34 +118,9 @@ static PID_val BallContral_Calculate_Filtered_PID(BallContral_t *BallContral,
 void BallContral_Run_Position_Hold(BallContral_t *BallContral, PID_val Target)
 {
     PID_val Output;
-    int32_t New_Target_Pulse;
-    int32_t Output_Step;
-    int32_t Delta_Pulse;
 
     if(!BallContral->is_Enable) return;
 
     Output = BallContral_Calculate_Filtered_PID(BallContral, Target);
-    if(Output >= 0.0f){
-        New_Target_Pulse = (int32_t)(Output + 0.5f);
-    }
-    else{
-        New_Target_Pulse = (int32_t)(Output - 0.5f);
-    }
-
-    Output_Step = New_Target_Pulse - BallContral->Pipe_Target_Pulse;
-    if(Output_Step > BALL_HOLD_OUTPUT_STEP_LIMIT){
-        New_Target_Pulse = BallContral->Pipe_Target_Pulse
-                         + BALL_HOLD_OUTPUT_STEP_LIMIT;
-    }
-    else if(Output_Step < -BALL_HOLD_OUTPUT_STEP_LIMIT){
-        New_Target_Pulse = BallContral->Pipe_Target_Pulse
-                         - BALL_HOLD_OUTPUT_STEP_LIMIT;
-    }
-
-    Delta_Pulse = New_Target_Pulse - BallContral->Pipe_Target_Pulse;
-    if(Delta_Pulse >= BALL_HOLD_COMMAND_DEADBAND_PULSE
-       || Delta_Pulse <= -BALL_HOLD_COMMAND_DEADBAND_PULSE){
-        Emm_Pos_Run_Quick(&BallContral->Emm_StepMotor, Delta_Pulse);
-        BallContral->Pipe_Target_Pulse = New_Target_Pulse;
-    }
+    BallContral_Set_Feedback_Output(BallContral, Output);
 }
