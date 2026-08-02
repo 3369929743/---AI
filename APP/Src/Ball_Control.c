@@ -7,6 +7,10 @@
 #define BALL_INTEGRAL_ERROR_LIMIT 28.0f
 #define BALL_INTEGRAL_SPEED_LIMIT 120.0f
 #define BALL_PID_OUTPUT_POLARITY (-1.0f)
+/*
+ * 电机命令死区，单位是脉冲而不是视觉像素。
+ * 新旧管道目标相差不足 3 脉冲时，不向电机发送新命令。
+ */
 #define BALL_MOTOR_COMMAND_DEADBAND_PULSE 3
 
 static PID_val BallContral_Calculate(BallContral_t *BallContral, PID_val Actual)

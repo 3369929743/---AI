@@ -4,13 +4,28 @@
 #include "Ball_Contral.h"
 #include "SoftTimer.h"
 
+/*
+ * 5 cm 移动目标对应的视觉像素数，在这里修改移动距离。
+ * 正向目标 = 本次起点 + BALL_5CM_OFFSET；
+ * 负向目标 = 本次起点 - BALL_5CM_OFFSET。
+ */
 #define BALL_5CM_OFFSET                 138.0f
-#define BALL_TARGET_TOLERANCE           4.0f
-#define BALL_MINUS_SETTLE_TOLERANCE     3.0f
+
+/* 到达正向 5 cm 目标的像素死区：误差不超过 4 像素即判定到位。 */
+#define BALL_TARGET_TOLERANCE           8.0f
+
+/* 到达负向 5 cm 目标的像素死区：误差不超过 3 像素即判定稳定。 */
+#define BALL_MINUS_SETTLE_TOLERANCE     8.0f
+
+/* 负向目标稳定检测：相邻视觉帧的位置变化不超过 3 像素。 */
 #define BALL_MINUS_SETTLE_DELTA         3.0f
 #define BALL_MINUS_SETTLE_SPEED         25.0f
 #define BALL_MINUS_SETTLE_MS            650U
 #define BALL_MINUS_SETTLE_FRAMES        8U
+/*
+ * 负向目标到位后的释放滞环：再次偏离超过 6 像素才恢复调控。
+ * 该值应大于 BALL_MINUS_SETTLE_TOLERANCE，避免在死区边缘反复启停。
+ */
 #define BALL_MINUS_RELEASE_TOLERANCE    6.0f
 #define BALL_MINUS_RELEASE_SPEED        50.0f
 #define BALL_MINUS_RELEASE_FRAMES       3U
@@ -20,9 +35,13 @@
 #define BALL_MINUS_TRIM_STEP_MAX        6.0f
 #define BALL_MINUS_TRIM_LIMIT           28.0f
 #define BALL_ENDPOINT_MIN_PROGRESS      100.0f
+/* 正向目标兜底判断使用的稳定带，不是 PID 的位置死区。 */
 #define BALL_ENDPOINT_STABLE_BAND       3.0f
 #define BALL_ENDPOINT_STABLE_MS         200U
 #define K230_FRAME_TIMEOUT_MS           250U
+
+/* 正向 5 cm 运动超时时间：超过 2 s 后自动切换到负向 5 cm。 */
+#define BALL_PLUS_5CM_TIMEOUT_MS        2000U
 
 typedef enum{
     TASK_BALL_TRAJECTORY_IDLE = 0,
@@ -35,14 +54,15 @@ typedef enum{
 static Serial_t Serial_K230;
 static Serial_t Serial_Emm_Ball;
 static SoftTimer_t SoftTimer_K230;
+static SoftTimer_t SoftTimer_Ball_Plus_5cm;
 
 static BallContral_t BallContral;
 
 /* 5 cm position trajectory: keep its original damping parameters. */
 static PID_Confg_t PID_Ball_5cm_Confg = {
-    .Kp = 0.9,
-    .Ki = 0.7,
-    .Kd = 0.45,
+    .Kp = 0.55,
+    .Ki = 0.3,
+    .Kd = 0.25,
     .IntMax = 40,
     .IntMin = -40,
     .OutMax = 220,
@@ -51,9 +71,9 @@ static PID_Confg_t PID_Ball_5cm_Confg = {
 
 /* Position hold: filtered damping is active during escape and return. */
 static PID_Confg_t PID_Ball_Hold_Confg = {
-    .Kp = 2.5,
+    .Kp = 1.5,
     .Ki = 0.45,
-    .Kd = 0.45,
+    .Kd = 0.35,
     .IntMax = 60,
     .IntMin = -60,
     .OutMax = 220,
@@ -150,6 +170,7 @@ static void Task_Ball_Minus_Trim_Target(PID_val Position_Error){
 }
 
 static void Task_Ball_Trajectory_Cancel(void){
+    SoftTimer_Stop(&SoftTimer_Ball_Plus_5cm);
     Task_Ball_Trajectory_State = TASK_BALL_TRAJECTORY_IDLE;
     Task_Ball_Endpoint_Tracking_Reset();
     Task_Ball_Minus_Final_Reset();
@@ -271,6 +292,8 @@ static void Task_Ball_Trajectory_Prepare(PID_val Position){
     Task_Ball_Minus_Final_Reset();
     BallContral_Start(&BallContral);
     BallContral_Set_Target(&BallContral, Task_Ball_Origin_x + BALL_5CM_OFFSET);
+    SoftTimer_Reset(&SoftTimer_Ball_Plus_5cm);
+    SoftTimer_Start(&SoftTimer_Ball_Plus_5cm);
     Task_Ball_Trajectory_State = TASK_BALL_TRAJECTORY_TO_PLUS_5CM;
 }
 
@@ -280,6 +303,7 @@ static void Task_Ball_Trajectory_Update(PID_val Position){
             if(Task_Ball_Target_Is_Reached(Position,
                                            Task_Ball_Origin_x + BALL_5CM_OFFSET,
                                            1)){
+                SoftTimer_Stop(&SoftTimer_Ball_Plus_5cm);
                 /* Keep velocity history for a smooth reversal, but discard old integral bias. */
                 BallContral_Clear_Integral(&BallContral);
                 Task_Ball_Minus_Begin_Return(Position);
@@ -309,6 +333,20 @@ static void Task_Ball_Trajectory_Update(PID_val Position){
     }
 }
 
+static void Task_Ball_Plus5cm_Timeout_Update(void){
+    if(Task_Ball_Trajectory_State != TASK_BALL_TRAJECTORY_TO_PLUS_5CM) return;
+    if(!SoftTimer_Trigger(&SoftTimer_Ball_Plus_5cm)) return;
+
+    /*
+     * 正向运动超过 2 s：放弃继续等待正向到位，直接切换到
+     * 以本次起点为基准的负向 5 cm 目标。
+     */
+    BallContral_Clear_Integral(&BallContral);
+    Task_Ball_Minus_Begin_Return(Task_Ball_Origin_x + BALL_5CM_OFFSET);
+    Task_Ball_Endpoint_Tracking_Reset();
+    Task_Ball_Trajectory_State = TASK_BALL_TRAJECTORY_TO_MINUS_5CM;
+}
+
 static void Task_Ball_Process_New_Frame(void){
     PID_val Position = (PID_val)K230_GetError_x();
 
@@ -331,6 +369,9 @@ void Task_Ball_Contral_Init(void){
     K230_Init(&Serial_K230, 0, 0);
 
     SoftTimer_Init(&SoftTimer_K230, SOFTTIMER_MODE_PERIODIC, K230_FRAME_TIMEOUT_MS);
+    SoftTimer_Init(&SoftTimer_Ball_Plus_5cm,
+                   SOFTTIMER_MODE_SINGLE,
+                   BALL_PLUS_5CM_TIMEOUT_MS);
 
     SoftTimer_Start(&SoftTimer_K230);
 
@@ -377,8 +418,11 @@ void Task_Ball_Contral_Loop(void){
                 BallContral_Stop(&BallContral);
                 Task_Ball_Contral_State = TASK_BALL_CONTRAL_LOST;
             }
-            else if(Has_New_Frame){
-                Task_Ball_Process_New_Frame();
+            else{
+                Task_Ball_Plus5cm_Timeout_Update();
+                if(Has_New_Frame){
+                    Task_Ball_Process_New_Frame();
+                }
             }
             break;
         case TASK_BALL_CONTRAL_LOST:
@@ -396,6 +440,7 @@ void Task_Ball_Contral_Loop(void){
 
 void Task_Ball_Contral_Tick(void){
     SoftTimer_Update(&SoftTimer_K230);
+    SoftTimer_Update(&SoftTimer_Ball_Plus_5cm);
 }
 
 void Task_Ball_Contral_Pop_Init(void){
@@ -425,6 +470,7 @@ void Task_Ball_GotoMinus5cm(void){
 void Task_Ball_Start_5cm_Sequence(void){
     /* Discard a frame buffered before the trigger, then wait for a fresh origin. */
     Task_Ball_Select_Control(0);
+    SoftTimer_Stop(&SoftTimer_Ball_Plus_5cm);
     (void)K230_GetFlag();
     SoftTimer_Reset(&SoftTimer_K230);
     Task_Ball_Trajectory_State = TASK_BALL_TRAJECTORY_WAIT_ORIGIN;
