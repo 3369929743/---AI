@@ -20,10 +20,4 @@ void Task_Ball_Goto5cm(void);
 void Task_Ball_GotoMinus5cm(void);
 void Task_Ball_Start_5cm_Sequence(void);
 void Task_Ball_Reset_Zero(void);
-uint8_t Task_Ball_Get_Control_State(void);
-uint8_t Task_Ball_Get_Trajectory_State(void);
-uint32_t Task_Ball_Get_Vision_Frame_Age(void);
-int16_t Task_Ball_Get_Target_x(void);
-
-
 #endif

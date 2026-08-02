@@ -5,6 +5,8 @@
 #define JY61P_RX_BUFFER_SIZE    64
 #define JY61P_ACCEL_TYPE         0x51
 #define JY61P_PACKET_SIZE        11
+#define JY61P_CALIBRATION_SAMPLES 50U
+#define JY61P_CALIBRATION_MOTION_THRESHOLD 100
 
 typedef enum {
     JY61P_SYNC = 0,
@@ -26,9 +28,88 @@ typedef struct {
 
     JY61P_Accel_t Accel;
     uint8_t       AccelFresh;
+
+    int32_t       AccelSumX;
+    int32_t       AccelSumY;
+    int32_t       AccelSumZ;
+    int32_t       AccelZeroX;
+    int32_t       AccelZeroY;
+    int32_t       AccelZeroZ;
+    int16_t       CalibrationPreviousX;
+    int16_t       CalibrationPreviousY;
+    int16_t       CalibrationPreviousZ;
+    uint16_t      CalibrationCount;
+    uint8_t       HasCalibrationPrevious;
+    uint8_t       IsCalibrated;
 } JY61P_Buffer_t;
 
 static JY61P_Buffer_t JY61P_Buffer;
+
+static int32_t JY61P_Abs32(int32_t Value)
+{
+    return (Value < 0) ? -Value : Value;
+}
+
+static int32_t JY61P_Divide_Rounded(int32_t Sum, int32_t Divisor)
+{
+    if(Sum >= 0){
+        return (Sum + Divisor / 2) / Divisor;
+    }
+    return (Sum - Divisor / 2) / Divisor;
+}
+
+static void JY61P_Calibration_Reset_Accumulation(void)
+{
+    JY61P_Buffer.AccelSumX = 0;
+    JY61P_Buffer.AccelSumY = 0;
+    JY61P_Buffer.AccelSumZ = 0;
+    JY61P_Buffer.CalibrationCount = 0;
+}
+
+static void JY61P_Calibration_Update(void)
+{
+    int32_t DeltaX;
+    int32_t DeltaY;
+    int32_t DeltaZ;
+
+    if(JY61P_Buffer.IsCalibrated) return;
+
+    if(JY61P_Buffer.HasCalibrationPrevious){
+        DeltaX = (int32_t)JY61P_Buffer.Accel.Ax
+               - (int32_t)JY61P_Buffer.CalibrationPreviousX;
+        DeltaY = (int32_t)JY61P_Buffer.Accel.Ay
+               - (int32_t)JY61P_Buffer.CalibrationPreviousY;
+        DeltaZ = (int32_t)JY61P_Buffer.Accel.Az
+               - (int32_t)JY61P_Buffer.CalibrationPreviousZ;
+
+        /* Restart the average if the platform is moved during calibration. */
+        if(JY61P_Abs32(DeltaX) > JY61P_CALIBRATION_MOTION_THRESHOLD
+           || JY61P_Abs32(DeltaY) > JY61P_CALIBRATION_MOTION_THRESHOLD
+           || JY61P_Abs32(DeltaZ) > JY61P_CALIBRATION_MOTION_THRESHOLD){
+            JY61P_Calibration_Reset_Accumulation();
+        }
+    }
+
+    JY61P_Buffer.CalibrationPreviousX = JY61P_Buffer.Accel.Ax;
+    JY61P_Buffer.CalibrationPreviousY = JY61P_Buffer.Accel.Ay;
+    JY61P_Buffer.CalibrationPreviousZ = JY61P_Buffer.Accel.Az;
+    JY61P_Buffer.HasCalibrationPrevious = 1;
+
+    JY61P_Buffer.AccelSumX += JY61P_Buffer.Accel.Ax;
+    JY61P_Buffer.AccelSumY += JY61P_Buffer.Accel.Ay;
+    JY61P_Buffer.AccelSumZ += JY61P_Buffer.Accel.Az;
+    JY61P_Buffer.CalibrationCount++;
+
+    if(JY61P_Buffer.CalibrationCount >= JY61P_CALIBRATION_SAMPLES){
+        JY61P_Buffer.AccelZeroX = JY61P_Divide_Rounded(
+            JY61P_Buffer.AccelSumX, JY61P_Buffer.CalibrationCount);
+        JY61P_Buffer.AccelZeroY = JY61P_Divide_Rounded(
+            JY61P_Buffer.AccelSumY, JY61P_Buffer.CalibrationCount);
+        JY61P_Buffer.AccelZeroZ = JY61P_Divide_Rounded(
+            JY61P_Buffer.AccelSumZ, JY61P_Buffer.CalibrationCount);
+        JY61P_Buffer.IsCalibrated = 1;
+    }
+}
 
 typedef struct {
     JY61P_ParseState_e State;
@@ -95,6 +176,12 @@ void JY61P_Init(Serial_t *Serial)
     JY61P_Buffer.ReadPtr    = JY61P_Buffer.BufferB;
     JY61P_Buffer.BufferFlag = 0;
     JY61P_Buffer.AccelFresh = 0;
+    JY61P_Buffer.AccelZeroX = 0;
+    JY61P_Buffer.AccelZeroY = 0;
+    JY61P_Buffer.AccelZeroZ = 0;
+    JY61P_Buffer.HasCalibrationPrevious = 0;
+    JY61P_Buffer.IsCalibrated = 0;
+    JY61P_Calibration_Reset_Accumulation();
 
     Serial_SetRxBuffer(Serial, JY61P_Buffer.ProcessPtr, JY61P_RX_BUFFER_SIZE);
     Serial_ReceiveToIdle_IT(Serial);
@@ -124,11 +211,18 @@ uint8_t JY61P_Accel_Update(void)
     if(!Primask) __enable_irq();
 
     JY61P_Buffer.AccelFresh = 0;
-    return JY61P_Parse_Snapshot(Snapshot, Size);
+    if(!JY61P_Parse_Snapshot(Snapshot, Size)){
+        return 0;
+    }
+
+    JY61P_Calibration_Update();
+    return 1;
 }
 
 void JY61P_Get_Accel(JY61P_Accel_t *Accel)
 {
+    if(Accel == NULL) return;
+
     uint32_t Primask = __get_PRIMASK();
     __disable_irq();
     Accel->Ax   = JY61P_Buffer.Accel.Ax;
@@ -136,6 +230,37 @@ void JY61P_Get_Accel(JY61P_Accel_t *Accel)
     Accel->Az   = JY61P_Buffer.Accel.Az;
     Accel->Temp = JY61P_Buffer.Accel.Temp;
     if(!Primask) __enable_irq();
+}
+
+uint8_t JY61P_Is_Calibrated(void)
+{
+    return JY61P_Buffer.IsCalibrated;
+}
+
+uint16_t JY61P_Get_Calibration_Count(void)
+{
+    return JY61P_Buffer.CalibrationCount;
+}
+
+uint16_t JY61P_Get_Calibration_Target(void)
+{
+    return JY61P_CALIBRATION_SAMPLES;
+}
+
+void JY61P_Get_Calibrated_Accel(JY61P_CalibratedAccel_t *Accel)
+{
+    if(Accel == NULL) return;
+
+    if(!JY61P_Buffer.IsCalibrated){
+        Accel->Ax = 0;
+        Accel->Ay = 0;
+        Accel->Az = 0;
+        return;
+    }
+
+    Accel->Ax = (int32_t)JY61P_Buffer.Accel.Ax - JY61P_Buffer.AccelZeroX;
+    Accel->Ay = (int32_t)JY61P_Buffer.Accel.Ay - JY61P_Buffer.AccelZeroY;
+    Accel->Az = (int32_t)JY61P_Buffer.Accel.Az - JY61P_Buffer.AccelZeroZ;
 }
 
 static void JY61P_Rx_Event(Serial_t *Serial, uint16_t Size)
