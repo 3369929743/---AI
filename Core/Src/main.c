@@ -34,6 +34,7 @@
 #include "Task_Ball_Contral.h"
 #include "JY61P.h"
 #include "Serial.h"
+#include "Task_Blue.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -125,6 +126,7 @@ int main(void)
   JY61P_Init(&Serial_JY61P);
   Task_Ball_Contral_Init();
   Task_Ball_Contral_Pop_Init();
+  Task_Blue_Init();
   Timer_Init(&Timer_Tick, Timer_14);
   Timer_Start_IT(&Timer_Tick, Timer_Tick_Callback);
   /* USER CODE END 2 */
@@ -145,6 +147,7 @@ int main(void)
     }
 
     Task_Ball_Contral_Loop();
+    Task_Blue_Loop();
 
     /* OLED 只用于观察校准、Y 轴加速度和前馈，限制刷新避免拖慢控制。 */
     if((uint32_t)(HAL_GetTick() - OLED_Last_Update) >= 100U){

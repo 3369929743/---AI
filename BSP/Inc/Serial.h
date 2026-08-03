@@ -9,7 +9,7 @@
 
 #include <stdint.h>
 
-#define TxBuffer_Size 64
+#define TxBuffer_Size 128
 
 #define SERIAL_LIST  \
     X(1, USART1)     \

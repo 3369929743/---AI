@@ -2,6 +2,7 @@
 #include "K230.h"
 #include "Serial.h"
 #include "Ball_Contral.h"
+#include "Ball_Feedforward.h"
 #include "SoftTimer.h"
 
 /*
@@ -57,20 +58,9 @@
  */
 #define BALL_TIMEOUT_MINUS_PIXEL_REDUCTION 20.0f
 
-/*
- * JY61P Y 轴加速度前馈参数。JY61P 原始量程中约 2048 个计数等于 1 g。
- * 当前 128 像素约等于 5 cm，因此 1 cm 误差约为 26 像素。
- */
-#define BALL_IMU_FF_POLARITY            (1.0f)  /**< 若前馈使球偏移更大，改为 -1.0f */
-#define BALL_IMU_FF_GAIN                 0.18f  /**< 每个 Ay 原始计数对应的电机前馈脉冲 */
-#define BALL_IMU_FF_TRIGGER_THRESHOLD   80.0f   /**< |Ay|达到该值时，本帧立即启用前馈 */
-#define BALL_IMU_FF_DEADBAND            20.0f   /**< Ay 零点附近死区，抑制静止噪声 */
-#define BALL_IMU_FF_OUTPUT_LIMIT        50.0f   /**< 限制短时前馈幅值，防止把球推向管道一边 */
-#define BALL_IMU_FF_FILTER_TAU_MS       10.0f   /**< 加速度低通时间常数，越小响应越快 */
-#define BALL_IMU_FF_MAX_ACTIVE_MS       180U    /**< 单次事件最长作用时间，到时强制撤销 */
-#define BALL_IMU_FF_TIMEOUT_MS          150U    /**< 超过该时间无 IMU 数据则撤销前馈 */
-#define BALL_IMU_FF_VISION_ABORT_ERROR  12.0f   /**< 偏差达到该值立即撤销前馈，单位：像素 */
-#define BALL_IMU_FF_VISION_REARM_ERROR   6.0f   /**< 回到该范围内才允许新的前馈事件 */
+/* 电机0x36实时位置查询周期与允许年龄；前馈只在真实位置反馈新鲜时启用。 */
+#define BALL_MOTOR_POSITION_QUERY_MS      50U
+#define BALL_MOTOR_POSITION_MAX_AGE_MS   200U
 
 typedef enum{
     TASK_BALL_TRAJECTORY_IDLE = 0,
@@ -98,13 +88,13 @@ static PID_Confg_t PID_Ball_5cm_Confg = {
     .Alpha = 1.0
 };
 
-/* Position hold: filtered damping is active during escape and return. */
+/* 原点保持 PID，与独立的 5 cm PID 分开配置。 */
 static PID_Confg_t PID_Ball_Hold_Confg = {
     .Kp = 1.5,
     .Ki = 0.45,
     .Kd = 0.35,
-    .IntMax = 60,
-    .IntMin = -60,
+    .IntMax = 20,
+    .IntMin = -20,
     .OutMax = 220,
     .Alpha = 1.0
 };
@@ -125,18 +115,90 @@ static PID_val Task_Ball_Minus_Final_Target_x = 0.0f;
 static PID_val Task_Ball_Minus_Target_Trim = 0.0f;
 static PID_val Task_Ball_Minus_Pixel_Reduction = 0.0f;
 static uint8_t Task_Ball_Use_Position_Hold = 0;
-static PID_val Task_Ball_IMU_Accel_Filtered = 0.0f;
-static uint32_t Task_Ball_IMU_Last_Tick = 0;
-static uint8_t Task_Ball_IMU_Has_Sample = 0;
-static uint8_t Task_Ball_IMU_FF_Active = 0;
-static uint8_t Task_Ball_IMU_FF_Trigger_Armed = 1;
-static int8_t Task_Ball_IMU_FF_Event_Sign = 0;
-static uint32_t Task_Ball_IMU_FF_Active_Tick = 0;
-static uint8_t Task_Ball_IMU_FF_Vision_Blocked = 0;
+static BallFeedforward_t Task_Ball_Feedforward;
+static PID_val Task_Ball_Motor_Actual_Pulse = 0.0f;
+static PID_val Task_Ball_Motor_Position_Origin = 0.0f;
+static uint32_t Task_Ball_Motor_Position_Age = 0xFFFFFFFFUL;
+static uint8_t Task_Ball_Motor_Position_Valid = 0U;
+static uint8_t Task_Ball_Motor_Position_Has_Origin = 0U;
+
+static uint8_t Task_Ball_IMU_Feedforward_Can_Apply(void){
+    return Task_Ball_Use_Position_Hold
+        && Task_Ball_Contral_State == TASK_BALL_CONTRAL_RUNNING
+        && BallContral_Get_is_Enable(&BallContral)
+        && K230_IsZeroReady()
+        && Task_Ball_Motor_Position_Valid
+        && Task_Ball_Motor_Position_Age
+           <= BALL_MOTOR_POSITION_MAX_AGE_MS;
+}
+
+static void Task_Ball_IMU_Feedforward_Apply(void){
+    uint8_t Active =
+        (uint8_t)(Task_Ball_Feedforward.State != BALL_FEEDFORWARD_IDLE
+                  && Task_Ball_Feedforward.Position_Blend > 0.0f
+                  && Task_Ball_IMU_Feedforward_Can_Apply());
+
+    BallContral.Hold_Integral_Frozen = Active;
+    if(Active){
+        BallContral.Hold_Is_Locked = 0U;
+        BallContral.Hold_Lock_Frames = 0U;
+        BallContral.Hold_Release_Frames = 0U;
+    }
+    BallContral_Set_Feedforward_Target(
+        &BallContral,
+        Active,
+        Task_Ball_Feedforward.Baseline_Pulse,
+        Task_Ball_Feedforward.Target_Offset_Pulse,
+        Task_Ball_Feedforward.Position_Blend);
+}
+
+static void Task_Ball_IMU_Feedforward_Reset(void){
+    BallFeedforward_Reset_Control(&Task_Ball_Feedforward,
+                                  BallContral.Pipe_Target_Pulse);
+    BallContral.Hold_Integral_Frozen = 0U;
+    BallContral_Set_Feedforward_Target(&BallContral,
+                                      0U, 0.0f, 0.0f, 0.0f);
+}
+
+static void Task_Ball_Motor_Position_Update(void){
+    Task_Ball_Motor_Position_Valid = Emm_Get_RealTime_Position_Pulse(
+        &BallContral.Emm_StepMotor,
+        &Task_Ball_Motor_Actual_Pulse,
+        &Task_Ball_Motor_Position_Age);
+    if(Task_Ball_Motor_Position_Valid
+       && !Task_Ball_Motor_Position_Has_Origin){
+        /* 对齐驱动器绝对位置与本工程从 0 开始累计的管道目标。 */
+        Task_Ball_Motor_Position_Origin =
+            Task_Ball_Motor_Actual_Pulse
+            - (PID_val)BallContral.Pipe_Target_Pulse;
+        Task_Ball_Motor_Position_Has_Origin = 1U;
+    }
+}
+
+static void Task_Ball_IMU_Feedforward_Timeout_Update(void){
+    uint32_t Now = HAL_GetTick();
+
+    Emm_Position_Feedback_Loop(&BallContral.Emm_StepMotor,
+                               Now,
+                               BALL_MOTOR_POSITION_QUERY_MS);
+    Task_Ball_Motor_Position_Update();
+    if(BallFeedforward_Check_Timeout(&Task_Ball_Feedforward,
+                                    BallContral.Pipe_Target_Pulse,
+                                    Now)){
+        Task_Ball_IMU_Feedforward_Apply();
+    }
+    if(Task_Ball_Motor_Position_Valid
+       && Task_Ball_Motor_Position_Age
+          > BALL_MOTOR_POSITION_MAX_AGE_MS
+       && Task_Ball_Feedforward.State != BALL_FEEDFORWARD_IDLE){
+        Task_Ball_IMU_Feedforward_Reset();
+    }
+}
 
 static void Task_Ball_Select_Control(uint8_t Use_Position_Hold){
     if(Task_Ball_Use_Position_Hold == Use_Position_Hold) return;
 
+    Task_Ball_IMU_Feedforward_Reset();
     Task_Ball_Use_Position_Hold = Use_Position_Hold;
     if(Use_Position_Hold){
         PID_Init(&BallContral.PID_StepMotor, &PID_Ball_Hold_Confg);
@@ -156,81 +218,6 @@ static PID_val Task_Ball_Clamp(PID_val Value, PID_val Min, PID_val Max){
     if(Value > Max) return Max;
     if(Value < Min) return Min;
     return Value;
-}
-
-static uint8_t Task_Ball_IMU_Feedforward_Can_Apply(void){
-    /* IMU 前馈只服务于原点保持，不影响独立的 5 cm 轨迹 PID。 */
-    return Task_Ball_Use_Position_Hold
-        && Task_Ball_Contral_State == TASK_BALL_CONTRAL_RUNNING
-        && BallContral_Get_is_Enable(&BallContral)
-        && !Task_Ball_IMU_FF_Vision_Blocked;
-}
-
-static void Task_Ball_IMU_Feedforward_Apply(PID_val Feedforward){
-    if(!Task_Ball_IMU_Feedforward_Can_Apply()){
-        Feedforward = 0.0f;
-    }
-
-    Feedforward = Task_Ball_Clamp(Feedforward,
-                                  -BALL_IMU_FF_OUTPUT_LIMIT,
-                                   BALL_IMU_FF_OUTPUT_LIMIT);
-    BallContral_Set_Feedforward_Output(&BallContral, Feedforward);
-}
-
-static void Task_Ball_IMU_Feedforward_Timeout_Update(void){
-    uint32_t Now = HAL_GetTick();
-
-    if(Task_Ball_IMU_FF_Active
-       && (uint32_t)(Now - Task_Ball_IMU_FF_Active_Tick)
-          >= BALL_IMU_FF_MAX_ACTIVE_MS){
-        /* 同方向持续加速度不会重新触发，必须先回死区或发生反向事件。 */
-        Task_Ball_IMU_FF_Active = 0;
-        Task_Ball_IMU_Feedforward_Apply(0.0f);
-    }
-
-    if(!Task_Ball_IMU_Has_Sample) return;
-
-    if((uint32_t)(Now - Task_Ball_IMU_Last_Tick)
-       <= BALL_IMU_FF_TIMEOUT_MS){
-        return;
-    }
-
-    Task_Ball_IMU_Has_Sample = 0;
-    Task_Ball_IMU_FF_Active = 0;
-    Task_Ball_IMU_FF_Trigger_Armed = 1;
-    Task_Ball_IMU_FF_Event_Sign = 0;
-    Task_Ball_IMU_FF_Active_Tick = 0;
-    Task_Ball_IMU_Accel_Filtered = 0.0f;
-    Task_Ball_IMU_Feedforward_Apply(0.0f);
-}
-
-static void Task_Ball_IMU_Feedforward_Position_Guard(PID_val Position){
-    PID_val Error = Task_Ball_Abs(Position - BallContral.Hold_Target);
-
-    if(!Task_Ball_IMU_FF_Vision_Blocked
-       && Error >= BALL_IMU_FF_VISION_ABORT_ERROR){
-        /*
-         * 球在前馈期间明显偏离：立即放弃本次开环补偿，清除可能形成的
-         * 积分偏置和静止锁定，让本帧视觉 PID直接接管恢复。
-         */
-        Task_Ball_IMU_FF_Vision_Blocked = 1;
-        Task_Ball_IMU_FF_Active = 0;
-        Task_Ball_IMU_FF_Trigger_Armed = 0;
-        BallContral_Clear_Integral(&BallContral);
-        BallContral.Hold_Is_Locked = 0;
-        BallContral.Hold_Lock_Frames = 0;
-        BallContral.Hold_Release_Frames = 0;
-        Task_Ball_IMU_Feedforward_Apply(0.0f);
-        return;
-    }
-
-    if(Task_Ball_IMU_FF_Vision_Blocked
-       && Error <= BALL_IMU_FF_VISION_REARM_ERROR
-       && Task_Ball_Abs(Task_Ball_IMU_Accel_Filtered)
-          <= BALL_IMU_FF_DEADBAND){
-        Task_Ball_IMU_FF_Vision_Blocked = 0;
-        Task_Ball_IMU_FF_Trigger_Armed = 1;
-    }
 }
 
 static void Task_Ball_Endpoint_Tracking_Reset(void){
@@ -507,8 +494,6 @@ static void Task_Ball_Process_New_Frame(void){
     /* Switch the target before calculating this frame's PID output. */
     Task_Ball_Trajectory_Update(Position);
     if(Task_Ball_Use_Position_Hold){
-        /* 先用本帧视觉误差决定是否撤销前馈，再交给保持 PID。 */
-        Task_Ball_IMU_Feedforward_Position_Guard(Position);
         BallContral_Run_Position_Hold(&BallContral, Position);
     }
     else{
@@ -533,27 +518,24 @@ void Task_Ball_Contral_Init(void){
     BallContral_Set_Target(&BallContral, 0);
     Task_Ball_Contral_State = TASK_BALL_CONTRAL_IDLE;
     Task_Ball_Last_Vision_Frame_Tick = HAL_GetTick();
-    Task_Ball_IMU_Accel_Filtered = 0.0f;
-    Task_Ball_IMU_Last_Tick = 0;
-    Task_Ball_IMU_Has_Sample = 0;
-    Task_Ball_IMU_FF_Active = 0;
-    Task_Ball_IMU_FF_Trigger_Armed = 1;
-    Task_Ball_IMU_FF_Event_Sign = 0;
-    Task_Ball_IMU_FF_Active_Tick = 0;
-    Task_Ball_IMU_FF_Vision_Blocked = 0;
+    BallFeedforward_Init(&Task_Ball_Feedforward);
+    Task_Ball_Motor_Actual_Pulse = 0.0f;
+    Task_Ball_Motor_Position_Origin = 0.0f;
+    Task_Ball_Motor_Position_Age = 0xFFFFFFFFUL;
+    Task_Ball_Motor_Position_Valid = 0U;
+    Task_Ball_Motor_Position_Has_Origin = 0U;
+    Task_Ball_IMU_Feedforward_Reset();
     Task_Ball_Trajectory_Cancel();
 }
 
 void Task_Ball_Contral_Toggle(void){
     if(Task_Ball_Contral_State == TASK_BALL_CONTRAL_IDLE){
         Task_Ball_Trajectory_Cancel();
+        /* 丢弃按键前缓存的旧帧，确保下一帧才是真正的上电/启动原点。 */
+        (void)K230_GetFlag();
         K230_ResetZero();
         Task_Ball_Select_Control(1);
-        Task_Ball_IMU_FF_Active = 0;
-        Task_Ball_IMU_FF_Trigger_Armed = 1;
-        Task_Ball_IMU_FF_Event_Sign = 0;
-        Task_Ball_IMU_FF_Active_Tick = 0;
-        Task_Ball_IMU_FF_Vision_Blocked = 0;
+        Task_Ball_IMU_Feedforward_Reset();
         SoftTimer_Reset(&SoftTimer_K230);
         Task_Ball_Contral_State = TASK_BALL_CONTRAL_RUNNING;
         BallContral_Start(&BallContral);
@@ -562,6 +544,7 @@ void Task_Ball_Contral_Toggle(void){
         Task_Ball_Trajectory_Cancel();
         Task_Ball_Contral_State = TASK_BALL_CONTRAL_IDLE;
         BallContral_Stop(&BallContral);
+        Task_Ball_IMU_Feedforward_Reset();
     }
 }
 
@@ -586,6 +569,7 @@ void Task_Ball_Contral_Loop(void){
                     Task_Ball_Trajectory_State = TASK_BALL_TRAJECTORY_TO_MINUS_5CM;
                 }
                 BallContral_Stop(&BallContral);
+                Task_Ball_IMU_Feedforward_Reset();
                 Task_Ball_Contral_State = TASK_BALL_CONTRAL_LOST;
             }
             else{
@@ -610,94 +594,22 @@ void Task_Ball_Contral_Loop(void){
 
 void Task_Ball_Contral_Update_Acceleration(int32_t AccelAy){
     uint32_t Now = HAL_GetTick();
-    PID_val Accel = (PID_val)AccelAy;
-    PID_val Accel_Abs;
-    PID_val Effective_Accel;
-    PID_val Feedforward;
-    int8_t Accel_Sign;
-    uint8_t Is_New_Event = 0;
+    PID_val Position_Error = (PID_val)K230_GetError_x()
+                           - BallContral.Hold_Target;
 
-    if(!Task_Ball_IMU_Has_Sample){
-        Task_Ball_IMU_Accel_Filtered = Accel;
-        Task_Ball_IMU_Has_Sample = 1;
-    }
-    else{
-        uint32_t Dt_ms = Now - Task_Ball_IMU_Last_Tick;
-
-        if(Dt_ms > BALL_IMU_FF_TIMEOUT_MS){
-            Task_Ball_IMU_Accel_Filtered = Accel;
-        }
-        else if(Dt_ms > 0U){
-            PID_val Alpha = (PID_val)Dt_ms
-                          / (BALL_IMU_FF_FILTER_TAU_MS + (PID_val)Dt_ms);
-            Task_Ball_IMU_Accel_Filtered += Alpha
-                * (Accel - Task_Ball_IMU_Accel_Filtered);
-        }
-    }
-    Task_Ball_IMU_Last_Tick = Now;
-
-    if(Task_Ball_IMU_FF_Vision_Blocked){
-        /* 等视觉 PID 把球拉回安全范围，期间任何 Ay 都不能重新启动前馈。 */
-        Task_Ball_IMU_FF_Active = 0;
-        Task_Ball_IMU_Feedforward_Apply(0.0f);
-        return;
-    }
-
-    /* 使用未滤波 Ay 做边沿门限，不增加确认帧和固定触发延时。 */
-    Accel_Abs = Task_Ball_Abs(Accel);
-    Accel_Sign = (Accel >= 0.0f) ? 1 : -1;
-
-    if(Accel_Abs <= BALL_IMU_FF_DEADBAND){
-        Task_Ball_IMU_FF_Active = 0;
-        Task_Ball_IMU_FF_Trigger_Armed = 1;
-    }
-    else if(Accel_Abs >= BALL_IMU_FF_TRIGGER_THRESHOLD){
-        if(Task_Ball_IMU_FF_Trigger_Armed
-           || (Task_Ball_IMU_FF_Event_Sign != 0
-               && Accel_Sign != Task_Ball_IMU_FF_Event_Sign)){
-            Is_New_Event = 1;
-        }
-    }
-
-    if(Is_New_Event){
-        /* 反向制动事件直接采用当前 Ay，避免滤波残留造成短暂方向错误。 */
-        if(Task_Ball_IMU_FF_Event_Sign != 0
-           && Accel_Sign != Task_Ball_IMU_FF_Event_Sign){
-            Task_Ball_IMU_Accel_Filtered = Accel;
-        }
-        Task_Ball_IMU_FF_Active = 1;
-        Task_Ball_IMU_FF_Trigger_Armed = 0;
-        Task_Ball_IMU_FF_Event_Sign = Accel_Sign;
-        Task_Ball_IMU_FF_Active_Tick = Now;
-    }
-
-    if(Task_Ball_IMU_FF_Active
-       && (uint32_t)(Now - Task_Ball_IMU_FF_Active_Tick)
-          >= BALL_IMU_FF_MAX_ACTIVE_MS){
-        Task_Ball_IMU_FF_Active = 0;
-    }
-
-    if(!Task_Ball_IMU_FF_Active){
-        Task_Ball_IMU_Feedforward_Apply(0.0f);
-        return;
-    }
-
-    if(Task_Ball_IMU_Accel_Filtered > BALL_IMU_FF_DEADBAND){
-        Effective_Accel = Task_Ball_IMU_Accel_Filtered
-                        - BALL_IMU_FF_DEADBAND;
-    }
-    else if(Task_Ball_IMU_Accel_Filtered < -BALL_IMU_FF_DEADBAND){
-        Effective_Accel = Task_Ball_IMU_Accel_Filtered
-                        + BALL_IMU_FF_DEADBAND;
-    }
-    else{
-        Effective_Accel = 0.0f;
-    }
-
-    Feedforward = BALL_IMU_FF_POLARITY
-                * BALL_IMU_FF_GAIN
-                * Effective_Accel;
-    Task_Ball_IMU_Feedforward_Apply(Feedforward);
+    Task_Ball_Motor_Position_Update();
+    BallFeedforward_Update(
+        &Task_Ball_Feedforward,
+        AccelAy,
+        Position_Error,
+        BallContral.Pipe_Target_Pulse,
+        Task_Ball_Motor_Actual_Pulse,
+        (uint8_t)(Task_Ball_Motor_Position_Valid
+                  && Task_Ball_Motor_Position_Age
+                     <= BALL_MOTOR_POSITION_MAX_AGE_MS),
+        Task_Ball_IMU_Feedforward_Can_Apply(),
+        Now);
+    Task_Ball_IMU_Feedforward_Apply();
 }
 
 float Task_Ball_Contral_Get_IMU_Feedforward(void){
@@ -705,11 +617,83 @@ float Task_Ball_Contral_Get_IMU_Feedforward(void){
 }
 
 int32_t Task_Ball_Contral_Get_IMU_Accel_Filtered(void){
-    PID_val Accel = Task_Ball_IMU_Accel_Filtered;
+    PID_val Accel = Task_Ball_Feedforward.Filtered_Acceleration;
 
     return (Accel >= 0.0f) ?
            (int32_t)(Accel + 0.5f) :
            (int32_t)(Accel - 0.5f);
+}
+
+static int32_t Task_Ball_Debug_Round_x10(PID_val Value){
+    Value *= 10.0f;
+    return (Value >= 0.0f) ?
+           (int32_t)(Value + 0.5f) :
+           (int32_t)(Value - 0.5f);
+}
+
+void Task_Ball_Contral_Get_Debug_Data(Task_Ball_Debug_Data_t *Debug_Data){
+    uint8_t Flags = 0;
+    PID_val Combined_Output;
+
+    if(Debug_Data == 0) return;
+
+    if(Task_Ball_Feedforward.State == BALL_FEEDFORWARD_ACTIVE) Flags |= 0x01U;
+    if(Task_Ball_Feedforward.State == BALL_FEEDFORWARD_RETURNING) Flags |= 0x02U;
+    if(BallContral.Hold_Is_Locked) Flags |= 0x04U;
+    if(K230_IsZeroReady()) Flags |= 0x08U;
+    if(Task_Ball_Contral_State == TASK_BALL_CONTRAL_RUNNING) Flags |= 0x10U;
+    if(Task_Ball_Use_Position_Hold) Flags |= 0x20U;
+    if(Task_Ball_Feedforward.Has_Sample) Flags |= 0x40U;
+    if(Task_Ball_Motor_Position_Valid
+       && Task_Ball_Motor_Position_Age
+          <= BALL_MOTOR_POSITION_MAX_AGE_MS) Flags |= 0x80U;
+
+    Debug_Data->Accel_Ay_Filtered =
+        Task_Ball_Contral_Get_IMU_Accel_Filtered();
+    Debug_Data->Accel_Ay_Highpass =
+        (Task_Ball_Feedforward.Raw_Acceleration >= 0.0f) ?
+        (int32_t)(Task_Ball_Feedforward.Raw_Acceleration + 0.5f) :
+        (int32_t)(Task_Ball_Feedforward.Raw_Acceleration - 0.5f);
+    Debug_Data->Pipe_Target_Pulse = BallContral.Pipe_Target_Pulse;
+    Debug_Data->Feedforward_x10 =
+        Task_Ball_Debug_Round_x10(BallContral.Feedforward_Output);
+    Debug_Data->Feedback_x10 =
+        Task_Ball_Debug_Round_x10(BallContral.Feedback_Output);
+    if(BallContral.Feedforward_Target_Active){
+        Combined_Output = BallContral.Feedback_Output
+            + BallContral.Feedforward_Blend
+              * (BallContral.Feedforward_Baseline
+                 + BallContral.Feedforward_Output
+                 - BallContral.Feedback_Output);
+    }
+    else{
+        Combined_Output = BallContral.Feedback_Output
+                        + BallContral.Feedforward_Output;
+    }
+    Debug_Data->Combined_x10 =
+        Task_Ball_Debug_Round_x10(Combined_Output);
+    Debug_Data->Integral_x10 =
+        Task_Ball_Debug_Round_x10(BallContral.PID_StepMotor.ErrorInt);
+    if(Task_Ball_Motor_Position_Has_Origin){
+        PID_val Motor_Actual_Relative = Task_Ball_Motor_Actual_Pulse
+                                      - Task_Ball_Motor_Position_Origin;
+        Debug_Data->Motor_Actual_Pulse =
+            (Motor_Actual_Relative >= 0.0f) ?
+            (int32_t)(Motor_Actual_Relative + 0.5f) :
+            (int32_t)(Motor_Actual_Relative - 0.5f);
+    }
+    else{
+        Debug_Data->Motor_Actual_Pulse = 0;
+    }
+    Debug_Data->Motor_Position_Age_ms =
+        (Task_Ball_Motor_Position_Age <= 99999UL) ?
+        Task_Ball_Motor_Position_Age : 99999UL;
+    Debug_Data->Feedforward_Blend_x100 =
+        (uint16_t)(Task_Ball_Feedforward.Position_Blend * 100.0f + 0.5f);
+    Debug_Data->Vision_Zero_x = K230_GetZero_x();
+    Debug_Data->Vision_Error_x = K230_GetError_x();
+    Debug_Data->Target_x = (int16_t)BallContral.PID_StepMotor.Target;
+    Debug_Data->Flags = Flags;
 }
 
 void Task_Ball_Contral_Tick(void){
@@ -757,16 +741,19 @@ void Task_Ball_Start_5cm_Sequence(void){
     }
 }
 
-/* Compatibility API used by the current key mapping; not part of the trajectory. */
+/* Compatibility API retained for an explicit idle-state zero reset. */
 void Task_Ball_Reset_Zero(void){
+    /*
+     * 保持运行中禁止重采视觉零点，任何误调用都不能把大幅启停后的
+     * 偏移位置写成新的目标点。
+     */
+    if(Task_Ball_Contral_State != TASK_BALL_CONTRAL_IDLE) return;
+
     Task_Ball_Trajectory_Cancel();
     Task_Ball_Select_Control(1);
-    Task_Ball_IMU_FF_Active = 0;
-    Task_Ball_IMU_FF_Trigger_Armed = 1;
-    Task_Ball_IMU_FF_Event_Sign = 0;
-    Task_Ball_IMU_FF_Active_Tick = 0;
-    Task_Ball_IMU_FF_Vision_Blocked = 0;
-    Task_Ball_IMU_Feedforward_Apply(0.0f);
+    Task_Ball_IMU_Feedforward_Reset();
+    /* 只允许按键之后到达的新视觉帧成为零点。 */
+    (void)K230_GetFlag();
     K230_ResetZero();
     SoftTimer_Reset(&SoftTimer_K230);
     BallContral_Clear_Integral(&BallContral);

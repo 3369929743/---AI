@@ -17,6 +17,9 @@ typedef struct BallContral_Struct{
     int32_t Pipe_Target_Pulse;
     PID_val Feedback_Output;
     PID_val Feedforward_Output;
+    PID_val Feedforward_Baseline;
+    PID_val Feedforward_Blend;
+    uint8_t Feedforward_Target_Active;
     int32_t Output_Step_Limit;
     PID_val Output_Pulse_Reduction;
     PID_val Ball_Position_Pre;
@@ -24,6 +27,7 @@ typedef struct BallContral_Struct{
     uint32_t Last_Frame_Tick;
     uint8_t Has_Ball_History;
     PID_val Hold_Target;
+    uint8_t Hold_Integral_Frozen;
     uint8_t Hold_Is_Locked;
     uint8_t Hold_Lock_Frames;
     uint8_t Hold_Release_Frames;
@@ -36,6 +40,11 @@ void BallContral_Set_Output_Step_Limit(BallContral_t *BallContral, int32_t StepL
 void BallContral_Set_Output_Pulse_Reduction(BallContral_t *BallContral, PID_val Reduction);
 void BallContral_Set_Feedback_Output(BallContral_t *BallContral, PID_val Output);
 void BallContral_Set_Feedforward_Output(BallContral_t *BallContral, PID_val Output);
+void BallContral_Set_Feedforward_Target(BallContral_t *BallContral,
+                                       uint8_t Active,
+                                       PID_val Baseline,
+                                       PID_val Offset,
+                                       PID_val Blend);
 void BallContral_Run(BallContral_t *BallContral, PID_val Target);
 void BallContral_Position_Mode_Init(BallContral_t *BallContral);
 void BallContral_Hold_Mode_Init(BallContral_t *BallContral);

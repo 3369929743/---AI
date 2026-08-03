@@ -10,6 +10,8 @@ uint8_t K230_Error_Update(void);
 uint8_t K230_GetFlag(void);
 void K230_ResetZero(void);
 uint8_t K230_IsZeroReady(void);
+uint8_t K230_IsZeroCapturePending(void);
+int16_t K230_GetZero_x(void);
 int16_t K230_GetError_x(void);
 int16_t K230_GetError_y(void);
 

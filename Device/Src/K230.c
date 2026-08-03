@@ -151,6 +151,16 @@ uint8_t K230_IsZeroReady(void)
     return K230_Buffer.ZeroReady;
 }
 
+uint8_t K230_IsZeroCapturePending(void)
+{
+    return K230_Buffer.ZeroCapturePending;
+}
+
+int16_t K230_GetZero_x(void)
+{
+    return K230_Buffer.Zero_x;
+}
+
 /**
  * @brief K230串口接收事件处理函数（在中断回调中调用）
  * @param Serial 串口对象指针，用于匹配对应的串口外设
