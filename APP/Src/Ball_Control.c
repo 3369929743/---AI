@@ -158,6 +158,9 @@ void BallContral_Init(BallContral_t *BallContral, Serial_t *Serial_K230, Serial_
     BallContral->Ball_Velocity = 0.0f;
     BallContral->Last_Frame_Tick = 0;
     BallContral->Has_Ball_History = 0;
+    BallContral->Hold_Is_Locked = 0;
+    BallContral->Hold_Lock_Frames = 0;
+    BallContral->Hold_Release_Frames = 0;
 
     /* 初始化Emm位置快速控制模式 */
     Emm_Pos_Control_Quick_Init(&BallContral->Emm_StepMotor);
@@ -228,6 +231,9 @@ void BallContral_Start(BallContral_t *BallContral){
     BallContral->Feedforward_Output = 0.0f;
     BallContral->Ball_Velocity = 0.0f;
     BallContral->Has_Ball_History = 0;
+    BallContral->Hold_Is_Locked = 0;
+    BallContral->Hold_Lock_Frames = 0;
+    BallContral->Hold_Release_Frames = 0;
     BallContral->is_Enable = 1;
 }
 
@@ -241,5 +247,8 @@ void BallContral_Stop(BallContral_t *BallContral){
     BallContral->Feedforward_Output = 0.0f;
     BallContral->Ball_Velocity = 0.0f;
     BallContral->Has_Ball_History = 0;
+    BallContral->Hold_Is_Locked = 0;
+    BallContral->Hold_Lock_Frames = 0;
+    BallContral->Hold_Release_Frames = 0;
     BallContral->is_Enable = 0;
 }

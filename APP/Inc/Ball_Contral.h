@@ -24,6 +24,9 @@ typedef struct BallContral_Struct{
     uint32_t Last_Frame_Tick;
     uint8_t Has_Ball_History;
     PID_val Hold_Target;
+    uint8_t Hold_Is_Locked;
+    uint8_t Hold_Lock_Frames;
+    uint8_t Hold_Release_Frames;
 }BallContral_t;
 
 void BallContral_Init(BallContral_t *BallContral, Serial_t *Serial_K230, Serial_t *Serial_Emm, PID_Confg_t *PID_Confg);
