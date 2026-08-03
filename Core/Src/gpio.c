@@ -63,12 +63,6 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(User_LED_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : User_Key_Pin */
-  GPIO_InitStruct.Pin = User_Key_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
-  HAL_GPIO_Init(User_Key_GPIO_Port, &GPIO_InitStruct);
-
   /*Configure GPIO pin : GPIO_Laser_Pin */
   GPIO_InitStruct.Pin = GPIO_Laser_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;

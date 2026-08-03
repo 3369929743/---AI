@@ -10,8 +10,82 @@
 #define EMM_POS_RESET 0x0A // 位置重置功能码
 #define EMM_POS_RESER_ASSIST 0x6D // 位置重置辅助功能码
 #define EMM_SPEED_CONTROL 0xF6
+#define EMM_READ_REALTIME_POSITION 0x36
 
 #define DEFAULT_SPEED 50
+#define EMM_POSITION_RESPONSE_SIZE 8U
+#define EMM_POSITION_REQUEST_TIMEOUT_MS 30U
+#define EMM_POSITION_RAW_PER_REV 65536.0f
+#define EMM_CONTROL_PULSE_PER_REV 3200.0f
+
+static void Emm_Rx_Event(Serial_t *Serial, uint16_t Size);
+
+static void Emm_Position_Parse_Byte(Emm_t *Emm, uint8_t Byte)
+{
+    uint8_t Index = Emm->PositionFrameIndex;
+
+    if(Index == 0U){
+        if(Byte == Emm->Addr){
+            Emm->PositionFrame[0] = Byte;
+            Emm->PositionFrameIndex = 1U;
+        }
+        return;
+    }
+
+    if(Index == 1U){
+        if(Byte == EMM_READ_REALTIME_POSITION){
+            Emm->PositionFrame[1] = Byte;
+            Emm->PositionFrameIndex = 2U;
+        }
+        else if(Byte != Emm->Addr){
+            Emm->PositionFrameIndex = 0U;
+        }
+        return;
+    }
+
+    Emm->PositionFrame[Index] = Byte;
+    Index++;
+    Emm->PositionFrameIndex = Index;
+    if(Index < EMM_POSITION_RESPONSE_SIZE) return;
+
+    Emm->PositionFrameIndex = 0U;
+    if(Emm->PositionFrame[7] == CHECK_SUM
+       && Emm->PositionFrame[2] <= 1U){
+        uint32_t Magnitude =
+            ((uint32_t)Emm->PositionFrame[3] << 24)
+          | ((uint32_t)Emm->PositionFrame[4] << 16)
+          | ((uint32_t)Emm->PositionFrame[5] << 8)
+          |  (uint32_t)Emm->PositionFrame[6];
+        int32_t Position;
+
+        if(Magnitude > 0x7FFFFFFFUL) Magnitude = 0x7FFFFFFFUL;
+        Position = (int32_t)Magnitude;
+        if(Emm->PositionFrame[2]) Position = -Position;
+
+        Emm->RealTimePositionRaw = Position;
+        Emm->PositionUpdateTick = HAL_GetTick();
+        Emm->PositionValid = 1U;
+        Emm->PositionRequestPending = 0U;
+    }
+}
+
+static void Emm_Rx_Event(Serial_t *Serial, uint16_t Size)
+{
+    Emm_t *Emm;
+    uint16_t Index;
+
+    if(Serial == 0 || Serial->User_Data == 0) return;
+    Emm = (Emm_t *)Serial->User_Data;
+    if(Emm->Serial != Serial) return;
+
+    if(Size > sizeof(Emm->RxBuffer)) Size = sizeof(Emm->RxBuffer);
+    for(Index = 0U; Index < Size; Index++){
+        Emm_Position_Parse_Byte(Emm, Emm->RxBuffer[Index]);
+    }
+
+    Serial_SetRxBuffer(Serial, Emm->RxBuffer, sizeof(Emm->RxBuffer));
+    Serial_ReceiveToIdle_IT(Serial);
+}
 
 /**
   * @brief  EMM-V5电机驱动器初始化函数
@@ -31,6 +105,96 @@ void Emm_Init(Emm_t *Emm, Serial_t *Serial)
 	Emm->Acc = 0;              /* 默认加速度：0表示使用驱动器默认加速度曲线 */
 	Emm->raF = 0;              /* 默认位置模式：0表示相对模式（相对上一目标位置），1表示绝对模式（相对坐标零点） */
 	Emm->snF = 0;              /* 默认同步模式：0表示不同步，1表示多机同步运动 */
+	Emm->PositionFrameIndex = 0U;
+	Emm->RealTimePositionRaw = 0;
+	Emm->PositionUpdateTick = 0U;
+	Emm->PositionValid = 0U;
+	Emm->PositionRequestPending = 0U;
+	Emm->PositionRequestTick = 0U;
+	Emm->PositionQueryTick = 0U;
+	Serial->User_Data = (uint8_t *)Emm;
+	Serial_SetRxBuffer(Serial, Emm->RxBuffer, sizeof(Emm->RxBuffer));
+	Serial->RxCallback = Emm_Rx_Event;
+	Serial_ReceiveToIdle_IT(Serial);
+}
+
+uint8_t Emm_Request_RealTime_Position(Emm_t *Emm)
+{
+    uint8_t Command[3];
+    uint32_t Now;
+
+    if(Emm == 0 || Emm->Serial == 0) return 0U;
+    Now = HAL_GetTick();
+    if(Emm->PositionRequestPending
+       && (uint32_t)(Now - Emm->PositionRequestTick)
+          < EMM_POSITION_REQUEST_TIMEOUT_MS){
+        return 0U;
+    }
+    if(Emm->Serial->isBusy) return 0U;
+
+    Command[0] = Emm->Addr;
+    Command[1] = EMM_READ_REALTIME_POSITION;
+    Command[2] = CHECK_SUM;
+    if(Serial_SendArray(Emm->Serial, Command, sizeof(Command)) != 0U){
+        return 0U;
+    }
+
+    Emm->PositionRequestPending = 1U;
+    Emm->PositionRequestTick = Now;
+    return 1U;
+}
+
+void Emm_Position_Feedback_Loop(Emm_t *Emm,
+                                uint32_t Now,
+                                uint32_t Period_ms)
+{
+    if(Emm == 0 || Period_ms == 0U) return;
+    if((uint32_t)(Now - Emm->PositionQueryTick) < Period_ms) return;
+
+    if(Emm_Request_RealTime_Position(Emm)){
+        Emm->PositionQueryTick = Now;
+    }
+}
+
+uint8_t Emm_Get_RealTime_Position(Emm_t *Emm,
+                                  int32_t *RawPosition,
+                                  uint32_t *Age_ms)
+{
+    uint32_t Primask;
+    uint32_t UpdateTick;
+    int32_t Position;
+    uint8_t Valid;
+
+    if(Emm == 0) return 0U;
+    Primask = __get_PRIMASK();
+    __disable_irq();
+    Position = Emm->RealTimePositionRaw;
+    UpdateTick = Emm->PositionUpdateTick;
+    Valid = Emm->PositionValid;
+    if(!Primask) __enable_irq();
+
+    if(RawPosition != 0) *RawPosition = Position;
+    if(Age_ms != 0) *Age_ms = HAL_GetTick() - UpdateTick;
+    return Valid;
+}
+
+uint8_t Emm_Get_RealTime_Position_Pulse(Emm_t *Emm,
+                                        float *PositionPulse,
+                                        uint32_t *Age_ms)
+{
+    int32_t RawPosition;
+    uint32_t Age;
+    uint8_t Valid = Emm_Get_RealTime_Position(Emm,
+                                              &RawPosition,
+                                              &Age);
+
+    if(PositionPulse != 0){
+        *PositionPulse = (float)RawPosition
+                       * EMM_CONTROL_PULSE_PER_REV
+                       / EMM_POSITION_RAW_PER_REV;
+    }
+    if(Age_ms != 0) *Age_ms = Age;
+    return Valid;
 }
 
 void Emm_Set_Addr(Emm_t * Emm, uint8_t Addr){

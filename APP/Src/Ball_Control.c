@@ -17,10 +17,10 @@
  * 新旧管道目标相差不足 3 脉冲时，不向电机发送新命令。
  */
 #define BALL_MOTOR_COMMAND_DEADBAND_PULSE 3
-
 /*
- * 将视觉 PID 反馈与小车启停前馈相加，最后统一做输出限幅、
- * 每帧变化限幅和电机命令死区。前馈因此不会绕过原有保护。
+ * 保持 PID 给出普通管道目标；启停前馈给出“触发前基准+加速度偏移”。
+ * Position_Blend 随钢球偏差由 1 降到 0，在绝对位置目标之间无扰切换，
+ * 而不是把两个绝对位置命令直接相加。
  */
 static void BallContral_Apply_Combined_Output(BallContral_t *BallContral)
 {
@@ -31,8 +31,21 @@ static void BallContral_Apply_Combined_Output(BallContral_t *BallContral)
 
     if(!BallContral->is_Enable) return;
 
-    Combined_Output = BallContral->Feedback_Output
-                    + BallContral->Feedforward_Output;
+    if(BallContral->Feedforward_Target_Active){
+        PID_val Blend = BallContral->Feedforward_Blend;
+        PID_val Feedforward_Target = BallContral->Feedforward_Baseline
+                                   + BallContral->Feedforward_Output;
+
+        if(Blend > 1.0f) Blend = 1.0f;
+        else if(Blend < 0.0f) Blend = 0.0f;
+        Combined_Output = BallContral->Feedback_Output
+                        + Blend * (Feedforward_Target
+                                   - BallContral->Feedback_Output);
+    }
+    else{
+        Combined_Output = BallContral->Feedback_Output
+                        + BallContral->Feedforward_Output;
+    }
     if(Combined_Output > BallContral->PID_StepMotor.OutMax){
         Combined_Output = BallContral->PID_StepMotor.OutMax;
     }
@@ -152,12 +165,16 @@ void BallContral_Init(BallContral_t *BallContral, Serial_t *Serial_K230, Serial_
     BallContral->Pipe_Target_Pulse = 0;
     BallContral->Feedback_Output = 0.0f;
     BallContral->Feedforward_Output = 0.0f;
+    BallContral->Feedforward_Baseline = 0.0f;
+    BallContral->Feedforward_Blend = 0.0f;
+    BallContral->Feedforward_Target_Active = 0U;
     BallContral->Output_Step_Limit = 0;
     BallContral->Output_Pulse_Reduction = 0.0f;
     BallContral->Ball_Position_Pre = 0.0f;
     BallContral->Ball_Velocity = 0.0f;
     BallContral->Last_Frame_Tick = 0;
     BallContral->Has_Ball_History = 0;
+    BallContral->Hold_Integral_Frozen = 0;
     BallContral->Hold_Is_Locked = 0;
     BallContral->Hold_Lock_Frames = 0;
     BallContral->Hold_Release_Frames = 0;
@@ -208,7 +225,23 @@ void BallContral_Set_Feedback_Output(BallContral_t *BallContral,
 void BallContral_Set_Feedforward_Output(BallContral_t *BallContral,
                                        PID_val Output)
 {
+    BallContral->Feedforward_Target_Active = 0U;
+    BallContral->Feedforward_Baseline = 0.0f;
+    BallContral->Feedforward_Blend = 0.0f;
     BallContral->Feedforward_Output = Output;
+    BallContral_Apply_Combined_Output(BallContral);
+}
+
+void BallContral_Set_Feedforward_Target(BallContral_t *BallContral,
+                                       uint8_t Active,
+                                       PID_val Baseline,
+                                       PID_val Offset,
+                                       PID_val Blend)
+{
+    BallContral->Feedforward_Target_Active = Active ? 1U : 0U;
+    BallContral->Feedforward_Baseline = Baseline;
+    BallContral->Feedforward_Output = Active ? Offset : 0.0f;
+    BallContral->Feedforward_Blend = Active ? Blend : 0.0f;
     BallContral_Apply_Combined_Output(BallContral);
 }
 
@@ -229,8 +262,12 @@ void BallContral_Start(BallContral_t *BallContral){
     PID_Clear(&BallContral->PID_StepMotor);
     BallContral->Feedback_Output = 0.0f;
     BallContral->Feedforward_Output = 0.0f;
+    BallContral->Feedforward_Baseline = 0.0f;
+    BallContral->Feedforward_Blend = 0.0f;
+    BallContral->Feedforward_Target_Active = 0U;
     BallContral->Ball_Velocity = 0.0f;
     BallContral->Has_Ball_History = 0;
+    BallContral->Hold_Integral_Frozen = 0;
     BallContral->Hold_Is_Locked = 0;
     BallContral->Hold_Lock_Frames = 0;
     BallContral->Hold_Release_Frames = 0;
@@ -245,8 +282,12 @@ void BallContral_Stop(BallContral_t *BallContral){
     PID_Clear(&BallContral->PID_StepMotor);
     BallContral->Feedback_Output = 0.0f;
     BallContral->Feedforward_Output = 0.0f;
+    BallContral->Feedforward_Baseline = 0.0f;
+    BallContral->Feedforward_Blend = 0.0f;
+    BallContral->Feedforward_Target_Active = 0U;
     BallContral->Ball_Velocity = 0.0f;
     BallContral->Has_Ball_History = 0;
+    BallContral->Hold_Integral_Frozen = 0;
     BallContral->Hold_Is_Locked = 0;
     BallContral->Hold_Lock_Frames = 0;
     BallContral->Hold_Release_Frames = 0;

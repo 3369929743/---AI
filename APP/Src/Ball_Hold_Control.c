@@ -40,6 +40,7 @@ static void BallContral_Hold_Reset_State(BallContral_t *BallContral)
     PID_Clear(&BallContral->PID_StepMotor);
     BallContral->Ball_Velocity = 0.0f;
     BallContral->Has_Ball_History = 0;
+    BallContral->Hold_Integral_Frozen = 0;
     BallContral_Hold_Reset_Lock(BallContral);
 }
 
@@ -149,16 +150,34 @@ void BallContral_Run_Position_Hold(BallContral_t *BallContral, PID_val Target)
     PID_val Output;
     PID_val Error;
     PID_val Speed;
+    uint8_t Has_Feedforward;
     uint8_t Was_Locked;
 
     if(!BallContral->is_Enable) return;
 
+    Has_Feedforward =
+        BallContral_Hold_Abs(BallContral->Feedforward_Output) > 0.5f;
+    if(Has_Feedforward || BallContral->Hold_Integral_Frozen){
+        /*
+         * 前馈是短时开环动作：期间保留 P/D 反馈，但冻结积分并解除静止锁定，
+         * 防止把前馈造成的管道角度积累成新的平衡点。
+         */
+        BallContral_Hold_Reset_Lock(BallContral);
+    }
+
     Was_Locked = BallContral->Hold_Is_Locked;
     Output = BallContral_Calculate_Filtered_PID(BallContral,
-                                                Target,
-                                                !Was_Locked);
+                                                 Target,
+                                                 !Was_Locked
+                                                 && !Has_Feedforward
+                                                 && !BallContral->Hold_Integral_Frozen);
     Error = BallContral_Hold_Abs(BallContral->PID_StepMotor.Cur_Error);
     Speed = BallContral_Hold_Abs(BallContral->Ball_Velocity);
+
+    if(Has_Feedforward){
+        BallContral_Set_Feedback_Output(BallContral, Output);
+        return;
+    }
 
     if(Was_Locked){
         /*
