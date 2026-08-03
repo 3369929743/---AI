@@ -34,7 +34,6 @@
 #include "Task_Ball_Contral.h"
 #include "JY61P.h"
 #include "Serial.h"
-#include "Task_Serial.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -62,8 +61,6 @@ uint32_t OLED_Last_Update = 0;
 extern DO_Device_t Laser;
 Serial_t Serial_JY61P;
 JY61P_CalibratedAccel_t Accel_Calibrated;
-uint8_t Car_Motor_Running = 0;
-Serial_t Serial_test;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -123,8 +120,9 @@ int main(void)
   /* USER CODE BEGIN 2 */
   Key_Glabal_Init();
   OLED_Init();
-  Task_Serial_Init();
-  Serial_Init(&Serial_test, Serial_5);
+  /* JY61P 使用 UART5：PC12(TX)、PD2(RX)，当前波特率 115200。 */
+  Serial_Init(&Serial_JY61P, Serial_5);
+  JY61P_Init(&Serial_JY61P);
   Task_Ball_Contral_Init();
   Task_Ball_Contral_Pop_Init();
   Timer_Init(&Timer_Tick, Timer_14);
@@ -139,17 +137,35 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     Key_Global_Trigger_Event();
+
+    /* 加速度数据优先处理，使前馈早于本轮视觉 PID 生效。 */
+    if(JY61P_Accel_Update() && JY61P_Is_Calibrated()){
+      JY61P_Get_Calibrated_Accel(&Accel_Calibrated);
+      Task_Ball_Contral_Update_Acceleration(Accel_Calibrated.Ay);
+    }
+
     Task_Ball_Contral_Loop();
 
-    Task_Serial_Loop();
+    /* OLED 只用于观察校准、Y 轴加速度和前馈，限制刷新避免拖慢控制。 */
+    if((uint32_t)(HAL_GetTick() - OLED_Last_Update) >= 100U){
+      OLED_Last_Update = HAL_GetTick();
+      if(JY61P_Is_Calibrated()){
+        float Feedforward = Task_Ball_Contral_Get_IMU_Feedforward();
+        int32_t Feedforward_x10 = (Feedforward >= 0.0f) ?
+            (int32_t)(Feedforward * 10.0f + 0.5f) :
+            (int32_t)(Feedforward * 10.0f - 0.5f);
 
-    if(Task_Serial_Get_Car_Motor_State(&Car_Motor_Running)){
-      (void)Task_Ball_Contral_Set_Car_Motor_State(Car_Motor_Running);
-    }
-    if(Task_Ball_Contral_Get_Car_Feedforward_Ready()){
-      OLED_ShowString(3, 2, "FF Ready");
-      /* 前馈准备时间结束，通知电机主控可以继续动作。 */
-      Task_Serial_Send_Feedforward_Complete();
+        OLED_ShowString(3, 1, "Ay:             ");
+        OLED_ShowSignedNum(3, 4,
+                           Task_Ball_Contral_Get_IMU_Accel_Filtered(), 6);
+        OLED_ShowString(4, 1, "FFx10:          ");
+        OLED_ShowSignedNum(4, 7, Feedforward_x10, 5);
+      }
+      else{
+        OLED_ShowString(3, 1, "IMU CAL:        ");
+        OLED_ShowNum(3, 9, JY61P_Get_Calibration_Count(), 3);
+        OLED_ShowString(4, 1, "Keep car still  ");
+      }
     }
   }
   /* USER CODE END 3 */
