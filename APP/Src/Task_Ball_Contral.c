@@ -9,10 +9,17 @@
  * 正向目标 = 本次起点 + BALL_5CM_OFFSET；
  * 负向目标 = 本次起点 - BALL_5CM_OFFSET。
  */
-#define BALL_5CM_OFFSET                 138.0f
+#define BALL_5CM_OFFSET                 128.0f
 
-/* 到达正向 5 cm 目标的像素死区：误差不超过 4 像素即判定到位。 */
-#define BALL_TARGET_TOLERANCE           8.0f
+/* 到达正向 5 cm 目标的进入门限：误差不超过 6 像素时开始确认。 */
+#define BALL_TARGET_TOLERANCE           6.0f
+/*
+ * 开始确认后的释放门限：下一帧只要仍在目标前 10 像素以内就保持确认。
+ * 该滞环允许钢球经过目标时有少量帧间抖动，不要求它停在目标点。
+ */
+#define BALL_TARGET_CONFIRM_TOLERANCE   10.0f
+/* 连续两帧确认到位，可滤除单帧跳点，同时避免确认时间过长。 */
+#define BALL_TARGET_CONFIRM_FRAMES      2U
 
 /* 到达负向 5 cm 目标的像素死区：误差不超过 3 像素即判定稳定。 */
 #define BALL_MINUS_SETTLE_TOLERANCE     8.0f
@@ -38,12 +45,17 @@
 /* 正向目标兜底判断使用的稳定带，不是 PID 的位置死区。 */
 #define BALL_ENDPOINT_STABLE_BAND       3.0f
 #define BALL_ENDPOINT_STABLE_MS         200U
+/* 已有 2 s 超时处理，默认关闭“未到目标但静止也算到位”的提前结束逻辑。 */
+#define BALL_ENDPOINT_STABLE_FALLBACK_ENABLE 0U
 #define K230_FRAME_TIMEOUT_MS           250U
 
 /* 正向 5 cm 运动超时时间：超过 2 s 后自动切换到负向 5 cm。 */
 #define BALL_PLUS_5CM_TIMEOUT_MS        2000U
-/* 正向 5 cm 超时后，负向折返阶段的电机目标脉冲幅值减小量。 */
-#define BALL_TIMEOUT_MINUS_PULSE_REDUCTION 20.0f
+/*
+ * 正向 5 cm 超时后，负向视觉目标距离的减小量，单位：像素。
+ * 当前设置为 20：超时折返目标 = 本次起点 - (128 - 20) = 本次起点 - 108。
+ */
+#define BALL_TIMEOUT_MINUS_PIXEL_REDUCTION 20.0f
 
 /*
  * 小车启停事件前馈参数（不使用陀螺仪/加速度计）。
@@ -113,12 +125,14 @@ static uint32_t Task_Ball_Last_Vision_Frame_Tick = 0;
 static PID_val Task_Ball_Endpoint_Anchor_x = 0.0f;
 static uint32_t Task_Ball_Endpoint_Stable_Tick = 0;
 static uint8_t Task_Ball_Endpoint_Tracking = 0;
+static uint8_t Task_Ball_Target_Confirm_Frames = 0;
 static uint32_t Task_Ball_Minus_Settle_Tick = 0;
 static uint8_t Task_Ball_Minus_Settle_Frames = 0;
 static uint8_t Task_Ball_Minus_Release_Frames = 0;
 static PID_val Task_Ball_Plus_Endpoint_x = 0.0f;
 static PID_val Task_Ball_Minus_Final_Target_x = 0.0f;
 static PID_val Task_Ball_Minus_Target_Trim = 0.0f;
+static PID_val Task_Ball_Minus_Pixel_Reduction = 0.0f;
 static uint8_t Task_Ball_Use_Position_Hold = 0;
 static Task_Ball_Car_FF_State_e Task_Ball_Car_FF_State = TASK_BALL_CAR_FF_IDLE;
 static uint32_t Task_Ball_Car_FF_Start_Tick = 0;
@@ -235,6 +249,7 @@ static void Task_Ball_Endpoint_Tracking_Reset(void){
     Task_Ball_Endpoint_Anchor_x = 0.0f;
     Task_Ball_Endpoint_Stable_Tick = 0;
     Task_Ball_Endpoint_Tracking = 0;
+    Task_Ball_Target_Confirm_Frames = 0;
 }
 
 static void Task_Ball_Minus_Tracking_Reset(void){
@@ -244,13 +259,15 @@ static void Task_Ball_Minus_Tracking_Reset(void){
 }
 
 static PID_val Task_Ball_Minus_Base_Target(void){
-    return Task_Ball_Origin_x - BALL_5CM_OFFSET;
+    return Task_Ball_Origin_x
+         - (BALL_5CM_OFFSET - Task_Ball_Minus_Pixel_Reduction);
 }
 
 static void Task_Ball_Minus_Final_Reset(void){
     Task_Ball_Plus_Endpoint_x = 0.0f;
     Task_Ball_Minus_Final_Target_x = 0.0f;
     Task_Ball_Minus_Target_Trim = 0.0f;
+    Task_Ball_Minus_Pixel_Reduction = 0.0f;
     Task_Ball_Minus_Tracking_Reset();
 }
 
@@ -259,7 +276,10 @@ static void Task_Ball_Minus_Apply_Target(void){
                            Task_Ball_Minus_Base_Target() + Task_Ball_Minus_Target_Trim);
 }
 
-static void Task_Ball_Minus_Begin_Return(PID_val Plus_Endpoint){
+static void Task_Ball_Minus_Begin_Return(PID_val Plus_Endpoint,
+                                         PID_val Pixel_Reduction){
+    Task_Ball_Minus_Pixel_Reduction = Task_Ball_Clamp(
+        Pixel_Reduction, 0.0f, BALL_5CM_OFFSET);
     Task_Ball_Plus_Endpoint_x = Plus_Endpoint;
     Task_Ball_Minus_Final_Target_x = (2.0f * Task_Ball_Origin_x) - Task_Ball_Plus_Endpoint_x;
     Task_Ball_Minus_Target_Trim = 0.0f;
@@ -352,20 +372,42 @@ static uint8_t Task_Ball_Target_Is_Reached(PID_val Position, PID_val Target,
                                            int8_t Direction){
     PID_val Progress;
     PID_val Anchor_Error;
+    PID_val Active_Tolerance;
+    uint8_t In_Target_Band;
+
+    Active_Tolerance = (Task_Ball_Target_Confirm_Frames == 0U) ?
+                       BALL_TARGET_TOLERANCE :
+                       BALL_TARGET_CONFIRM_TOLERANCE;
 
     if(Direction > 0){
-        if(Position >= Target - BALL_TARGET_TOLERANCE){
-            Task_Ball_Endpoint_Tracking_Reset();
-            return 1;
-        }
+        In_Target_Band = Position >= Target - Active_Tolerance;
         Progress = Position - Task_Ball_Origin_x;
     }
     else{
-        if(Position <= Target + BALL_TARGET_TOLERANCE){
+        In_Target_Band = Position <= Target + Active_Tolerance;
+        Progress = Task_Ball_Origin_x - Position;
+    }
+
+    if(In_Target_Band){
+        /* 到位必须由连续有效视觉帧确认，单帧跳点不会结束轨迹。 */
+        Task_Ball_Endpoint_Anchor_x = 0.0f;
+        Task_Ball_Endpoint_Stable_Tick = 0;
+        Task_Ball_Endpoint_Tracking = 0;
+        if(Task_Ball_Target_Confirm_Frames < BALL_TARGET_CONFIRM_FRAMES){
+            Task_Ball_Target_Confirm_Frames++;
+        }
+        if(Task_Ball_Target_Confirm_Frames >= BALL_TARGET_CONFIRM_FRAMES){
             Task_Ball_Endpoint_Tracking_Reset();
             return 1;
         }
-        Progress = Task_Ball_Origin_x - Position;
+        return 0;
+    }
+    Task_Ball_Target_Confirm_Frames = 0;
+
+    /* 禁用后必须真正进入目标死区；卡住时统一交给 2 s 超时处理。 */
+    if(!BALL_ENDPOINT_STABLE_FALLBACK_ENABLE){
+        Task_Ball_Endpoint_Tracking_Reset();
+        return 0;
     }
 
     if(Progress < BALL_ENDPOINT_MIN_PROGRESS){
@@ -422,7 +464,7 @@ static void Task_Ball_Trajectory_Update(PID_val Position){
                 BallContral_Set_Output_Pulse_Reduction(&BallContral, 0.0f);
                 /* Keep velocity history for a smooth reversal, but discard old integral bias. */
                 BallContral_Clear_Integral(&BallContral);
-                Task_Ball_Minus_Begin_Return(Position);
+                Task_Ball_Minus_Begin_Return(Position, 0.0f);
                 Task_Ball_Endpoint_Tracking_Reset();
                 Task_Ball_Trajectory_State = TASK_BALL_TRAJECTORY_TO_MINUS_5CM;
             }
@@ -455,12 +497,17 @@ static void Task_Ball_Plus5cm_Timeout_Update(void){
 
     /*
      * 正向运动超过 2 s：放弃继续等待正向到位，直接切换到
-     * 以本次起点为基准的负向 5 cm 目标。
+     * 以本次起点为基准、减去像素补偿量后的负向目标。
      */
     BallContral_Clear_Integral(&BallContral);
-    BallContral_Set_Output_Pulse_Reduction(
-        &BallContral, BALL_TIMEOUT_MINUS_PULSE_REDUCTION);
-    Task_Ball_Minus_Begin_Return(Task_Ball_Origin_x + BALL_5CM_OFFSET);
+    /*
+     * 超时只缩短负向视觉目标，不再削减电机 PID 输出脉冲。
+     * 传入等效正端点，使负端最终目标与缩短后的 PID 目标保持一致。
+     */
+    Task_Ball_Minus_Begin_Return(
+        Task_Ball_Origin_x + BALL_5CM_OFFSET
+                           - BALL_TIMEOUT_MINUS_PIXEL_REDUCTION,
+        BALL_TIMEOUT_MINUS_PIXEL_REDUCTION);
     Task_Ball_Endpoint_Tracking_Reset();
     Task_Ball_Trajectory_State = TASK_BALL_TRAJECTORY_TO_MINUS_5CM;
 }

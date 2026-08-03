@@ -4,7 +4,12 @@
 #define BALL_VELOCITY_FILTER_TAU_MS 60.0f
 #define BALL_FRAME_DT_MIN_MS 2U
 #define BALL_FRAME_DT_MAX_MS 200U
-#define BALL_INTEGRAL_ERROR_LIMIT 28.0f
+/*
+ * 5 cm 位置模式的积分作用范围，单位是视觉像素。
+ * 需要覆盖完整的 138 像素行程，否则球在误差大于 28 像素处卡住时，
+ * 积分不会继续增加管道坡度，表现为还没到目标就停住。
+ */
+#define BALL_POSITION_INTEGRAL_ERROR_LIMIT 160.0f
 #define BALL_INTEGRAL_SPEED_LIMIT 120.0f
 #define BALL_PID_OUTPUT_POLARITY (-1.0f)
 /*
@@ -107,7 +112,7 @@ static PID_val BallContral_Calculate(BallContral_t *BallContral, PID_val Actual)
     PID->Error_Rate_Filter = -BallContral->Ball_Velocity;
 
     if(Dt_s > 0.0f
-       && ((PID->Cur_Error >= 0.0f ? PID->Cur_Error : -PID->Cur_Error) <= BALL_INTEGRAL_ERROR_LIMIT)
+       && ((PID->Cur_Error >= 0.0f ? PID->Cur_Error : -PID->Cur_Error) <= BALL_POSITION_INTEGRAL_ERROR_LIMIT)
        && ((BallContral->Ball_Velocity >= 0.0f ? BallContral->Ball_Velocity : -BallContral->Ball_Velocity) <= BALL_INTEGRAL_SPEED_LIMIT)){
         PID->ErrorInt += PID->Cur_Error * Dt_s;
     }
