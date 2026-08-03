@@ -34,7 +34,7 @@
 #include "Task_Ball_Contral.h"
 #include "JY61P.h"
 #include "Serial.h"
-#include "Task_Serial.h"
+#include "Task_Blue.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -62,8 +62,6 @@ uint32_t OLED_Last_Update = 0;
 extern DO_Device_t Laser;
 Serial_t Serial_JY61P;
 JY61P_CalibratedAccel_t Accel_Calibrated;
-uint8_t Car_Motor_Running = 0;
-Serial_t Serial_test;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -123,10 +121,11 @@ int main(void)
   /* USER CODE BEGIN 2 */
   Key_Glabal_Init();
   OLED_Init();
-  Task_Serial_Init();
-  Serial_Init(&Serial_test, Serial_5);
   Task_Ball_Contral_Init();
   Task_Ball_Contral_Pop_Init();
+  Serial_Init(&Serial_JY61P, Serial_5);
+  JY61P_Init(&Serial_JY61P);
+  Task_Blue_Init();
   Timer_Init(&Timer_Tick, Timer_14);
   Timer_Start_IT(&Timer_Tick, Timer_Tick_Callback);
   /* USER CODE END 2 */
@@ -139,18 +138,14 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     Key_Global_Trigger_Event();
+
+    if(JY61P_Accel_Update() && JY61P_Is_Calibrated()){
+      JY61P_Get_Calibrated_Accel(&Accel_Calibrated);
+      Task_Ball_Contral_Update_Acceleration(Accel_Calibrated.Ay);
+    }
+
     Task_Ball_Contral_Loop();
-
-    Task_Serial_Loop();
-
-    if(Task_Serial_Get_Car_Motor_State(&Car_Motor_Running)){
-      (void)Task_Ball_Contral_Set_Car_Motor_State(Car_Motor_Running);
-    }
-    if(Task_Ball_Contral_Get_Car_Feedforward_Ready()){
-      OLED_ShowString(3, 2, "FF Ready");
-      /* 前馈准备时间结束，通知电机主控可以继续动作。 */
-      Task_Serial_Send_Feedforward_Complete();
-    }
+    Task_Blue_Loop();
   }
   /* USER CODE END 3 */
 }

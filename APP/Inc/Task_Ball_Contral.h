@@ -9,13 +9,23 @@ typedef enum{
     TASK_BALL_CONTRAL_LOST,
 }Task_Ball_Contral_State_e;
 
+typedef struct{
+    int32_t AccelerationY;
+    int32_t AccelerationDeltaY;
+    int32_t FixedOutputX10;
+    uint32_t TriggerCount;
+    int32_t PositionError;
+    int32_t PipeTargetPulse;
+    uint8_t ImpactState;
+    uint8_t ImpactAction;
+}Task_Ball_Impact_Debug_t;
+
 void Task_Ball_Contral_Init(void);
 void Task_Ball_Contral_Toggle(void);
 void Task_Ball_Contral_Loop(void);
 void Task_Ball_Contral_Tick(void);
-uint8_t Task_Ball_Contral_Set_Car_Motor_State(uint8_t IsRunning);
-uint8_t Task_Ball_Contral_Get_Car_Feedforward_Ready(void);
-float Task_Ball_Contral_Get_Car_Feedforward(void);
+void Task_Ball_Contral_Update_Acceleration(int32_t AccelerationY);
+void Task_Ball_Contral_Get_Impact_Debug(Task_Ball_Impact_Debug_t *Debug);
 void Task_Ball_Contral_Pop_Init(void);
 void Task_Ball_Contral_Pop_Ready(void);
 void Task_Ball_Contral_Pop_Restore(void);

@@ -58,21 +58,20 @@
 #define BALL_TIMEOUT_MINUS_PIXEL_REDUCTION 20.0f
 
 /*
- * 小车启停事件前馈参数（不使用陀螺仪/加速度计）。
- * 当前 138 像素约等于 5 cm，因此 1 cm 误差约为 28 像素。
- *
+ * 小车冲击固定压杆参数，只在“原点保持”模式生效，不修改视觉目标。
+ * 触发条件：相邻两帧校准后 Ay 的变化量绝对值大于 80。
  */
-#define BALL_CAR_FF_POLARITY            (1.0f)   /**< 前馈方向极性，若启动后误差反而增大，改为 -1.0f */
-#define BALL_CAR_START_FF_PULSE         25.0f    /**< 启动瞬间附加的管道目标脉冲 */
-#define BALL_CAR_STOP_FF_PULSE          25.0f    /**< 停止瞬间附加的管道目标脉冲 */
-#define BALL_CAR_START_FF_HOLD_MS       200U     /**< 启动前馈峰值维持时间(ms) */
-#define BALL_CAR_START_FF_FADE_MS       300U     /**< 启动前馈从峰值衰减到0的时间(ms) */
-#define BALL_CAR_STOP_FF_HOLD_MS        150U     /**< 停止前馈峰值维持时间(ms) */
-#define BALL_CAR_STOP_FF_FADE_MS        300U     /**< 停止前馈从峰值衰减到0的时间(ms) */
-#define BALL_CAR_FF_OUTPUT_LIMIT        60.0f    /**< 前馈输出上限 */
-#define BALL_CAR_FF_MIN_UPDATE          0.5f     /**< 前馈最小更新间隔(s) */
-
-#define BALL_CAR_FF_READY_DELAY_MS       0U
+#define BALL_IMPACT_DELTA_THRESHOLD     80       /**< Ay 相邻帧变化触发阈值 */
+#define BALL_IMPACT_START_LOWER_PULSE   25.0f    /**< 第一次/启动突变时的固定压杆脉冲 */
+#define BALL_IMPACT_STOP_RAISE_PULSE    25.0f    /**< 第二次/停车突变时的固定抬杆脉冲 */
+#define BALL_IMPACT_HOLD_MS             100U     /**< 固定压杆保持时间 */
+#define BALL_IMPACT_RETURN_MS           150U     /**< 从固定脉冲平滑摆正到 0 的时间 */
+#define BALL_IMPACT_REARM_DELTA         20       /**< Ay 变化回到该值内才准备下次触发 */
+#define BALL_IMPACT_REARM_MS            2000U     /**< 连续安静多久后允许再次触发 */
+#define BALL_IMPACT_POLARITY            (1.0f)   /**< 压杆方向相反时改成 -1.0f */
+#define BALL_IMPACT_OUTPUT_LIMIT        60.0f    /**< 固定动作输出保护上限 */
+#define BALL_IMPACT_MIN_UPDATE          0.5f     /**< 脉冲变化不足该值时不重复发电机命令 */
+#define BALL_IMPACT_IMU_TIMEOUT_MS      150U     /**< 超过该时间没有 Ay 新帧就撤销动作 */
 
 typedef enum{
     TASK_BALL_TRAJECTORY_IDLE = 0,
@@ -83,11 +82,17 @@ typedef enum{
 }Task_Ball_Trajectory_State_e;
 
 typedef enum{
-    TASK_BALL_CAR_FF_IDLE = 0,
-    TASK_BALL_CAR_FF_START,
-    TASK_BALL_CAR_FF_RUN,
-    TASK_BALL_CAR_FF_STOP,
-}Task_Ball_Car_FF_State_e;
+    TASK_BALL_IMPACT_IDLE = 0,
+    TASK_BALL_IMPACT_ACTIVE,
+    TASK_BALL_IMPACT_RETURN,
+    TASK_BALL_IMPACT_REARM,
+}Task_Ball_Impact_State_e;
+
+typedef enum{
+    TASK_BALL_IMPACT_ACTION_NONE = 0,
+    TASK_BALL_IMPACT_ACTION_LOWER,
+    TASK_BALL_IMPACT_ACTION_RAISE,
+}Task_Ball_Impact_Action_e;
 
 static Serial_t Serial_K230;
 static Serial_t Serial_Emm_Ball;
@@ -134,13 +139,19 @@ static PID_val Task_Ball_Minus_Final_Target_x = 0.0f;
 static PID_val Task_Ball_Minus_Target_Trim = 0.0f;
 static PID_val Task_Ball_Minus_Pixel_Reduction = 0.0f;
 static uint8_t Task_Ball_Use_Position_Hold = 0;
-static Task_Ball_Car_FF_State_e Task_Ball_Car_FF_State = TASK_BALL_CAR_FF_IDLE;
-static uint32_t Task_Ball_Car_FF_Start_Tick = 0;
-static PID_val Task_Ball_Car_FF_Applied = 0.0f;
-static uint8_t Task_Ball_Car_Motor_Running = 0;
-static uint8_t Task_Ball_Car_Motor_State_Valid = 0;
-static uint8_t Task_Ball_Car_FF_Ready_Pending = 0;
-static uint32_t Task_Ball_Car_FF_Ready_Tick = 0;
+static Task_Ball_Impact_State_e Task_Ball_Impact_State = TASK_BALL_IMPACT_IDLE;
+static uint32_t Task_Ball_Impact_State_Tick = 0;
+static uint32_t Task_Ball_Impact_Rearm_Tick = 0;
+static uint32_t Task_Ball_Impact_Last_Accel_Tick = 0;
+static uint32_t Task_Ball_Impact_Trigger_Count = 0;
+static int32_t Task_Ball_Impact_AccelerationY = 0;
+static int32_t Task_Ball_Impact_Previous_AccelerationY = 0;
+static int32_t Task_Ball_Impact_DeltaY = 0;
+static uint8_t Task_Ball_Impact_Has_Previous = 0;
+static uint8_t Task_Ball_Impact_Next_Is_Stop = 0;
+static Task_Ball_Impact_Action_e Task_Ball_Impact_Action = TASK_BALL_IMPACT_ACTION_NONE;
+static PID_val Task_Ball_Impact_Peak = 0.0f;
+static PID_val Task_Ball_Impact_Applied = 0.0f;
 
 static void Task_Ball_Select_Control(uint8_t Use_Position_Hold){
     if(Task_Ball_Use_Position_Hold == Use_Position_Hold) return;
@@ -166,83 +177,96 @@ static PID_val Task_Ball_Clamp(PID_val Value, PID_val Min, PID_val Max){
     return Value;
 }
 
-static PID_val Task_Ball_Car_FF_Profile(PID_val Peak,
-                                        uint32_t Elapsed_ms,
-                                        uint32_t Hold_ms,
-                                        uint32_t Fade_ms){
-    if(Elapsed_ms < Hold_ms) return Peak;
-
-    Elapsed_ms -= Hold_ms;
-    if(Elapsed_ms >= Fade_ms || Fade_ms == 0U) return 0.0f;
-
-    return Peak * (PID_val)(Fade_ms - Elapsed_ms) / (PID_val)Fade_ms;
+static uint8_t Task_Ball_Impact_Can_Apply(void){
+    return Task_Ball_Use_Position_Hold
+        && Task_Ball_Contral_State == TASK_BALL_CONTRAL_RUNNING
+        && BallContral_Get_is_Enable(&BallContral);
 }
 
-static uint8_t Task_Ball_Car_Feedforward_Apply(PID_val Feedforward){
+static void Task_Ball_Impact_Apply(PID_val FixedOutput){
     PID_val Change;
-    uint8_t Can_Apply;
 
-    /* 5 cm 轨迹使用独立 PID，不允许小车前馈影响它。 */
-    Can_Apply = Task_Ball_Use_Position_Hold
-             && Task_Ball_Contral_State == TASK_BALL_CONTRAL_RUNNING
-             && BallContral_Get_is_Enable(&BallContral);
-    if(!Can_Apply){
-        Feedforward = 0.0f;
+    /* 5 cm 轨迹、停机或视觉丢失时，固定动作必须立即撤销。 */
+    if(!Task_Ball_Impact_Can_Apply()){
+        FixedOutput = 0.0f;
     }
 
-    Feedforward = Task_Ball_Clamp(Feedforward,
-                                  -BALL_CAR_FF_OUTPUT_LIMIT,
-                                   BALL_CAR_FF_OUTPUT_LIMIT);
-    Change = Task_Ball_Abs(Feedforward - Task_Ball_Car_FF_Applied);
-    if(Feedforward == 0.0f){
-        if(Task_Ball_Car_FF_Applied == 0.0f) return Can_Apply;
+    FixedOutput = Task_Ball_Clamp(FixedOutput,
+                                  -BALL_IMPACT_OUTPUT_LIMIT,
+                                   BALL_IMPACT_OUTPUT_LIMIT);
+    Change = Task_Ball_Abs(FixedOutput - Task_Ball_Impact_Applied);
+    if(FixedOutput == 0.0f){
+        if(Task_Ball_Impact_Applied == 0.0f) return;
     }
-    else if(Change < BALL_CAR_FF_MIN_UPDATE){
-        return Can_Apply;
+    else if(Change < BALL_IMPACT_MIN_UPDATE){
+        return;
     }
 
-    Task_Ball_Car_FF_Applied = Feedforward;
-    BallContral_Set_Feedforward_Output(&BallContral, Feedforward);
-    return Can_Apply;
+    Task_Ball_Impact_Applied = FixedOutput;
+    BallContral_Set_Feedforward_Output(&BallContral, FixedOutput);
 }
 
-static uint8_t Task_Ball_Car_Feedforward_Update(void){
-    uint32_t Elapsed_ms = HAL_GetTick() - Task_Ball_Car_FF_Start_Tick;
-    PID_val Feedforward = 0.0f;
+static void Task_Ball_Impact_Reset_Action(uint8_t ResetAcceleration){
+    Task_Ball_Impact_State = TASK_BALL_IMPACT_IDLE;
+    Task_Ball_Impact_State_Tick = 0;
+    Task_Ball_Impact_Rearm_Tick = 0;
+    Task_Ball_Impact_Peak = 0.0f;
+    Task_Ball_Impact_Apply(0.0f);
+    if(ResetAcceleration){
+        Task_Ball_Impact_Has_Previous = 0;
+        Task_Ball_Impact_DeltaY = 0;
+    }
+}
 
-    switch(Task_Ball_Car_FF_State){
-        case TASK_BALL_CAR_FF_START:
-            Feedforward = Task_Ball_Car_FF_Profile(
-                BALL_CAR_FF_POLARITY * BALL_CAR_START_FF_PULSE,
-                Elapsed_ms,
-                BALL_CAR_START_FF_HOLD_MS,
-                BALL_CAR_START_FF_FADE_MS);
-            if(Elapsed_ms >= BALL_CAR_START_FF_HOLD_MS
-                           + BALL_CAR_START_FF_FADE_MS){
-                Task_Ball_Car_FF_State = TASK_BALL_CAR_FF_RUN;
+static void Task_Ball_Impact_Update(void){
+    uint32_t Now = HAL_GetTick();
+    uint32_t Elapsed_ms;
+    PID_val FixedOutput = 0.0f;
+
+    if(!Task_Ball_Impact_Can_Apply()){
+        Task_Ball_Impact_Reset_Action(1);
+        return;
+    }
+
+    if(Task_Ball_Impact_Has_Previous
+       && (uint32_t)(Now - Task_Ball_Impact_Last_Accel_Tick)
+          > BALL_IMPACT_IMU_TIMEOUT_MS){
+        Task_Ball_Impact_Reset_Action(1);
+        return;
+    }
+
+    Elapsed_ms = Now - Task_Ball_Impact_State_Tick;
+    switch(Task_Ball_Impact_State){
+        case TASK_BALL_IMPACT_ACTIVE:
+            FixedOutput = Task_Ball_Impact_Peak;
+            if(Elapsed_ms >= BALL_IMPACT_HOLD_MS){
+                Task_Ball_Impact_State = TASK_BALL_IMPACT_RETURN;
+                Task_Ball_Impact_State_Tick = Now;
             }
             break;
 
-        case TASK_BALL_CAR_FF_STOP:
-            Feedforward = Task_Ball_Car_FF_Profile(
-                -BALL_CAR_FF_POLARITY * BALL_CAR_STOP_FF_PULSE,
-                Elapsed_ms,
-                BALL_CAR_STOP_FF_HOLD_MS,
-                BALL_CAR_STOP_FF_FADE_MS);
-            if(Elapsed_ms >= BALL_CAR_STOP_FF_HOLD_MS
-                           + BALL_CAR_STOP_FF_FADE_MS){
-                Task_Ball_Car_FF_State = TASK_BALL_CAR_FF_IDLE;
+        case TASK_BALL_IMPACT_RETURN:
+            if(Elapsed_ms < BALL_IMPACT_RETURN_MS){
+                FixedOutput = Task_Ball_Impact_Peak
+                            * (PID_val)(BALL_IMPACT_RETURN_MS - Elapsed_ms)
+                            / (PID_val)BALL_IMPACT_RETURN_MS;
+            }
+            else{
+                Task_Ball_Impact_State = TASK_BALL_IMPACT_REARM;
+                Task_Ball_Impact_State_Tick = Now;
+                Task_Ball_Impact_Rearm_Tick = 0;
+                FixedOutput = 0.0f;
             }
             break;
 
-        case TASK_BALL_CAR_FF_IDLE:
-        case TASK_BALL_CAR_FF_RUN:
+        case TASK_BALL_IMPACT_REARM:
+        case TASK_BALL_IMPACT_IDLE:
         default:
-            Feedforward = 0.0f;
+            FixedOutput = 0.0f;
             break;
     }
 
-    return Task_Ball_Car_Feedforward_Apply(Feedforward);
+    Task_Ball_Impact_Apply(FixedOutput);
 }
 
 static void Task_Ball_Endpoint_Tracking_Reset(void){
@@ -543,12 +567,19 @@ void Task_Ball_Contral_Init(void){
     BallContral_Set_Target(&BallContral, 0);
     Task_Ball_Contral_State = TASK_BALL_CONTRAL_IDLE;
     Task_Ball_Last_Vision_Frame_Tick = HAL_GetTick();
-    Task_Ball_Car_FF_State = TASK_BALL_CAR_FF_IDLE;
-    Task_Ball_Car_FF_Applied = 0.0f;
-    Task_Ball_Car_Motor_Running = 0;
-    Task_Ball_Car_Motor_State_Valid = 0;
-    Task_Ball_Car_FF_Ready_Pending = 0;
-    Task_Ball_Car_FF_Ready_Tick = 0;
+    Task_Ball_Impact_State = TASK_BALL_IMPACT_IDLE;
+    Task_Ball_Impact_State_Tick = 0;
+    Task_Ball_Impact_Rearm_Tick = 0;
+    Task_Ball_Impact_Last_Accel_Tick = 0;
+    Task_Ball_Impact_Trigger_Count = 0;
+    Task_Ball_Impact_AccelerationY = 0;
+    Task_Ball_Impact_Previous_AccelerationY = 0;
+    Task_Ball_Impact_DeltaY = 0;
+    Task_Ball_Impact_Has_Previous = 0;
+    Task_Ball_Impact_Next_Is_Stop = 0;
+    Task_Ball_Impact_Action = TASK_BALL_IMPACT_ACTION_NONE;
+    Task_Ball_Impact_Peak = 0.0f;
+    Task_Ball_Impact_Applied = 0.0f;
     Task_Ball_Trajectory_Cancel();
 }
 
@@ -571,7 +602,7 @@ void Task_Ball_Contral_Toggle(void){
 void Task_Ball_Contral_Loop(void){
     uint8_t Has_New_Frame = 0;
 
-    Task_Ball_Car_Feedforward_Update();
+    Task_Ball_Impact_Update();
 
     switch(Task_Ball_Contral_State){
         case TASK_BALL_CONTRAL_IDLE:
@@ -611,75 +642,85 @@ void Task_Ball_Contral_Loop(void){
     }
 }
 
-uint8_t Task_Ball_Contral_Set_Car_Motor_State(uint8_t IsRunning){
-    uint8_t Feedforward_Applied;
+void Task_Ball_Contral_Update_Acceleration(int32_t AccelerationY){
+    uint32_t Now = HAL_GetTick();
+    int32_t DeltaY;
+    int32_t AbsDeltaY;
 
-    IsRunning = (IsRunning != 0U) ? 1U : 0U;
-    /* 新命令覆盖尚未回复的旧命令，避免回复错位。 */
-    Task_Ball_Car_FF_Ready_Pending = 0;
+    Task_Ball_Impact_AccelerationY = AccelerationY;
+    Task_Ball_Impact_Last_Accel_Tick = Now;
 
-    /* 第一次收到停止帧仅同步状态，不产生一次假的制动前馈。 */
-    if(!Task_Ball_Car_Motor_State_Valid){
-        Task_Ball_Car_Motor_State_Valid = 1;
-        Task_Ball_Car_Motor_Running = IsRunning;
-        if(!IsRunning){
-            Task_Ball_Car_FF_State = TASK_BALL_CAR_FF_IDLE;
-            Feedforward_Applied = Task_Ball_Car_Feedforward_Apply(0.0f);
-            if(Feedforward_Applied){
-                Task_Ball_Car_FF_Ready_Pending = 1;
-                Task_Ball_Car_FF_Ready_Tick = HAL_GetTick();
+    /* 第一帧只建立相邻帧基准，不能误触发。 */
+    if(!Task_Ball_Impact_Has_Previous){
+        Task_Ball_Impact_Previous_AccelerationY = AccelerationY;
+        Task_Ball_Impact_DeltaY = 0;
+        Task_Ball_Impact_Has_Previous = 1;
+        return;
+    }
+
+    DeltaY = AccelerationY - Task_Ball_Impact_Previous_AccelerationY;
+    Task_Ball_Impact_Previous_AccelerationY = AccelerationY;
+    Task_Ball_Impact_DeltaY = DeltaY;
+    AbsDeltaY = (DeltaY < 0) ? -DeltaY : DeltaY;
+
+    if(Task_Ball_Impact_State == TASK_BALL_IMPACT_IDLE){
+        if(Task_Ball_Impact_Can_Apply()
+           && AbsDeltaY > BALL_IMPACT_DELTA_THRESHOLD){
+            /*
+             * 不再用 Ay 正负猜测启停：第一次突变按启动压杆，
+             * 下一次突变按停车抬杆，随后继续交替。
+             */
+            if(Task_Ball_Impact_Next_Is_Stop){
+                Task_Ball_Impact_Action = TASK_BALL_IMPACT_ACTION_RAISE;
+                Task_Ball_Impact_Peak = -BALL_IMPACT_POLARITY
+                                      * BALL_IMPACT_STOP_RAISE_PULSE;
+                Task_Ball_Impact_Next_Is_Stop = 0;
             }
-            return Feedforward_Applied;
+            else{
+                Task_Ball_Impact_Action = TASK_BALL_IMPACT_ACTION_LOWER;
+                Task_Ball_Impact_Peak = BALL_IMPACT_POLARITY
+                                      * BALL_IMPACT_START_LOWER_PULSE;
+                Task_Ball_Impact_Next_Is_Stop = 1;
+            }
+            Task_Ball_Impact_State = TASK_BALL_IMPACT_ACTIVE;
+            Task_Ball_Impact_State_Tick = Now;
+            Task_Ball_Impact_Rearm_Tick = 0;
+            Task_Ball_Impact_Trigger_Count++;
+            /* 陀螺仪新帧到达时立即压杆，不等待下一帧视觉数据。 */
+            Task_Ball_Impact_Apply(Task_Ball_Impact_Peak);
+        }
+        return;
+    }
+
+    if(Task_Ball_Impact_State == TASK_BALL_IMPACT_REARM){
+        if(AbsDeltaY <= BALL_IMPACT_REARM_DELTA){
+            if(Task_Ball_Impact_Rearm_Tick == 0U){
+                Task_Ball_Impact_Rearm_Tick = Now;
+            }
+            else if((uint32_t)(Now - Task_Ball_Impact_Rearm_Tick)
+                    >= BALL_IMPACT_REARM_MS){
+                Task_Ball_Impact_State = TASK_BALL_IMPACT_IDLE;
+                Task_Ball_Impact_State_Tick = Now;
+                Task_Ball_Impact_Rearm_Tick = 0;
+            }
+        }
+        else{
+            Task_Ball_Impact_Rearm_Tick = 0;
         }
     }
-    else{
-        if(IsRunning == Task_Ball_Car_Motor_Running){
-            Feedforward_Applied = Task_Ball_Use_Position_Hold
-                               && Task_Ball_Contral_State == TASK_BALL_CONTRAL_RUNNING
-                               && BallContral_Get_is_Enable(&BallContral);
-            if(Feedforward_Applied){
-                Task_Ball_Car_FF_Ready_Pending = 1;
-                Task_Ball_Car_FF_Ready_Tick = HAL_GetTick();
-            }
-            return Feedforward_Applied;
-        }
-        Task_Ball_Car_Motor_Running = IsRunning;
-    }
-
-    Task_Ball_Car_FF_Start_Tick = HAL_GetTick();
-    Task_Ball_Car_FF_State = IsRunning ?
-                             TASK_BALL_CAR_FF_START :
-                             TASK_BALL_CAR_FF_STOP;
-    /* 收到双主控事件后立即下发第一拍前馈，不等待下一帧视觉数据。 */
-    Feedforward_Applied = Task_Ball_Car_Feedforward_Update();
-    if(Feedforward_Applied){
-        Task_Ball_Car_FF_Ready_Pending = 1;
-        Task_Ball_Car_FF_Ready_Tick = HAL_GetTick();
-    }
-    return Feedforward_Applied;
 }
 
-uint8_t Task_Ball_Contral_Get_Car_Feedforward_Ready(void){
-    if(!Task_Ball_Car_FF_Ready_Pending) return 0;
+void Task_Ball_Contral_Get_Impact_Debug(Task_Ball_Impact_Debug_t *Debug){
+    if(Debug == 0) return;
 
-    if(!Task_Ball_Use_Position_Hold
-       || Task_Ball_Contral_State != TASK_BALL_CONTRAL_RUNNING
-       || !BallContral_Get_is_Enable(&BallContral)){
-        Task_Ball_Car_FF_Ready_Pending = 0;
-        return 0;
-    }
-
-    if((uint32_t)(HAL_GetTick() - Task_Ball_Car_FF_Ready_Tick)
-       < BALL_CAR_FF_READY_DELAY_MS){
-        return 0;
-    }
-
-    Task_Ball_Car_FF_Ready_Pending = 0;
-    return 1;
-}
-
-float Task_Ball_Contral_Get_Car_Feedforward(void){
-    return (float)Task_Ball_Car_FF_Applied;
+    Debug->AccelerationY = Task_Ball_Impact_AccelerationY;
+    Debug->AccelerationDeltaY = Task_Ball_Impact_DeltaY;
+    Debug->FixedOutputX10 = (int32_t)(Task_Ball_Impact_Applied * 10.0f);
+    Debug->TriggerCount = Task_Ball_Impact_Trigger_Count;
+    Debug->PositionError = (int32_t)BallContral.PID_StepMotor.Cur_Error;
+    Debug->PipeTargetPulse = BallContral.Pipe_Target_Pulse;
+    Debug->ImpactState = (uint8_t)Task_Ball_Impact_State;
+    Debug->ImpactAction = (uint8_t)Task_Ball_Impact_Action;
 }
 
 void Task_Ball_Contral_Tick(void){
