@@ -3,6 +3,7 @@
 #include "Serial.h"
 #include "Ball_Contral.h"
 #include "SoftTimer.h"
+#include "Ball_Impact_Config.h"
 
 /*
  * 5 cm 移动目标对应的视觉像素数，在这里修改移动距离。
@@ -62,8 +63,6 @@
  * 触发条件：相邻两帧校准后 Ay 的变化量绝对值大于 80。
  */
 #define BALL_IMPACT_DELTA_THRESHOLD     80       /**< Ay 相邻帧变化触发阈值 */
-#define BALL_IMPACT_START_LOWER_PULSE   25.0f    /**< 第一次/启动突变时的固定压杆脉冲 */
-#define BALL_IMPACT_STOP_RAISE_PULSE    25.0f    /**< 第二次/停车突变时的固定抬杆脉冲 */
 #define BALL_IMPACT_HOLD_MS             100U     /**< 固定压杆保持时间 */
 #define BALL_IMPACT_RETURN_MS           150U     /**< 从固定脉冲平滑摆正到 0 的时间 */
 #define BALL_IMPACT_REARM_DELTA         20       /**< Ay 变化回到该值内才准备下次触发 */
@@ -673,13 +672,13 @@ void Task_Ball_Contral_Update_Acceleration(int32_t AccelerationY){
             if(Task_Ball_Impact_Next_Is_Stop){
                 Task_Ball_Impact_Action = TASK_BALL_IMPACT_ACTION_RAISE;
                 Task_Ball_Impact_Peak = -BALL_IMPACT_POLARITY
-                                      * BALL_IMPACT_STOP_RAISE_PULSE;
+                    * (PID_val)BallImpactConfig_Get_Stop_Raise();
                 Task_Ball_Impact_Next_Is_Stop = 0;
             }
             else{
                 Task_Ball_Impact_Action = TASK_BALL_IMPACT_ACTION_LOWER;
                 Task_Ball_Impact_Peak = BALL_IMPACT_POLARITY
-                                      * BALL_IMPACT_START_LOWER_PULSE;
+                    * (PID_val)BallImpactConfig_Get_Start_Lower();
                 Task_Ball_Impact_Next_Is_Stop = 1;
             }
             Task_Ball_Impact_State = TASK_BALL_IMPACT_ACTIVE;

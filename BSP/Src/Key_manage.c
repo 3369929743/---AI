@@ -1,6 +1,7 @@
 #include "Key_manage.h"
 #include "Key.h"
 #include "Task_Ball_Contral.h"
+#include "Ball_Impact_Config.h"
 
 static Key_t Key1, Key2, Key3, Key4;
 extern uint8_t i;
@@ -27,8 +28,12 @@ void Key_Global_Callback(Key_t *Key, Key_Event_e Event){
   if(Key == &Key2){
     switch (Event) {
       case KEY_EVENT_ONCE_PRESS:
+        BallImpactConfig_Adjust_Start_Lower(
+            BALL_IMPACT_CONFIG_STEP_PULSE);
         break;
       case KEY_EVENT_DOUBLE_PRESS:
+        BallImpactConfig_Adjust_Start_Lower(
+            -BALL_IMPACT_CONFIG_STEP_PULSE);
         break;
       case KEY_EVENT_LONG_PRESS:
         break;
@@ -41,8 +46,12 @@ void Key_Global_Callback(Key_t *Key, Key_Event_e Event){
   if(Key == &Key3){
     switch (Event) {
       case KEY_EVENT_ONCE_PRESS:
+        BallImpactConfig_Adjust_Stop_Raise(
+            BALL_IMPACT_CONFIG_STEP_PULSE);
         break;
       case KEY_EVENT_DOUBLE_PRESS:
+        BallImpactConfig_Adjust_Stop_Raise(
+            -BALL_IMPACT_CONFIG_STEP_PULSE);
         break;
       case KEY_EVENT_LONG_PRESS:
         break;
@@ -55,6 +64,7 @@ void Key_Global_Callback(Key_t *Key, Key_Event_e Event){
   if(Key == &Key4){
     switch (Event) {
       case KEY_EVENT_ONCE_PRESS:
+        (void)BallImpactConfig_Save();
         break;
       case KEY_EVENT_DOUBLE_PRESS:
         break;

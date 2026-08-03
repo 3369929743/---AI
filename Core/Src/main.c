@@ -35,6 +35,7 @@
 #include "JY61P.h"
 #include "Serial.h"
 #include "Task_Blue.h"
+#include "Ball_Impact_Config.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -58,7 +59,6 @@
 Timer_t Timer_Tick;
 uint8_t i = 0;
 uint8_t j = 0;
-uint32_t OLED_Last_Update = 0;
 extern DO_Device_t Laser;
 Serial_t Serial_JY61P;
 JY61P_CalibratedAccel_t Accel_Calibrated;
@@ -79,6 +79,45 @@ void Timer_Tick_Callback(Timer_t *timer){
     Key_Global_Tick();
     Task_Ball_Contral_Tick();
   }
+}
+
+static void Ball_Impact_Config_OLED_Update(void){
+  static uint16_t Last_Start_Lower = 0xFFFFU;
+  static uint16_t Last_Stop_Raise = 0xFFFFU;
+  static uint8_t Last_Dirty = 0xFFU;
+  static uint8_t Last_Save_Error = 0xFFU;
+  uint16_t Start_Lower = BallImpactConfig_Get_Start_Lower();
+  uint16_t Stop_Raise = BallImpactConfig_Get_Stop_Raise();
+  uint8_t Dirty = BallImpactConfig_Is_Dirty();
+  uint8_t Save_Error = BallImpactConfig_Has_Save_Error();
+
+  /* 只有参数或保存状态变化时才刷新，避免OLED通信拖慢控球循环。 */
+  if(Start_Lower == Last_Start_Lower
+     && Stop_Raise == Last_Stop_Raise
+     && Dirty == Last_Dirty
+     && Save_Error == Last_Save_Error){
+    return;
+  }
+
+  OLED_ShowString(1, 1, "K2 LOW  K3 RAISE");
+  if(Save_Error){
+    OLED_ShowString(2, 1, "K4 SAVE:ERROR   ");
+  }
+  else if(Dirty){
+    OLED_ShowString(2, 1, "K4 SAVE:PENDING ");
+  }
+  else{
+    OLED_ShowString(2, 1, "K4 SAVE:OK      ");
+  }
+  OLED_ShowString(3, 1, "LOWER:          ");
+  OLED_ShowNum(3, 8, Start_Lower, 3);
+  OLED_ShowString(4, 1, "RAISE:          ");
+  OLED_ShowNum(4, 8, Stop_Raise, 3);
+
+  Last_Start_Lower = Start_Lower;
+  Last_Stop_Raise = Stop_Raise;
+  Last_Dirty = Dirty;
+  Last_Save_Error = Save_Error;
 }
 
 /* USER CODE END 0 */
@@ -119,8 +158,10 @@ int main(void)
   MX_UART5_Init();
   MX_UART4_Init();
   /* USER CODE BEGIN 2 */
+  BallImpactConfig_Init();
   Key_Glabal_Init();
   OLED_Init();
+  Ball_Impact_Config_OLED_Update();
   Task_Ball_Contral_Init();
   Task_Ball_Contral_Pop_Init();
   Serial_Init(&Serial_JY61P, Serial_5);
@@ -146,6 +187,7 @@ int main(void)
 
     Task_Ball_Contral_Loop();
     Task_Blue_Loop();
+    Ball_Impact_Config_OLED_Update();
   }
   /* USER CODE END 3 */
 }
